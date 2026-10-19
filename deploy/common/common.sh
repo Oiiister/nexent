@@ -808,7 +808,7 @@ deployment_prepare_monitoring_env() {
       ;;
   esac
   deployment_update_monitoring_env_var "OTEL_EXPORTER_OTLP_ENDPOINT" "$otlp_endpoint"
-  deployment_update_monitoring_env_var "OTEL_EXPORTER_OTLP_PROTOCOL" "http"
+  deployment_update_monitoring_env_var "OTEL_EXPORTER_OTLP_PROTOCOL" "http/protobuf"
 
   collector_config_file="$(deployment_monitoring_collector_config_file "$target" "$provider")"
   deployment_update_monitoring_env_var "OTEL_COLLECTOR_CONFIG_FILE" "$collector_config_file"
