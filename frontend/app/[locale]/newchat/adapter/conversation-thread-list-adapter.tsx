@@ -1,4 +1,4 @@
-// Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+// Copyright (c) 2025-2026 Huawei Technologies Co., Ltd. All rights reserved.
 
 "use client";
 
@@ -11,8 +11,6 @@ import {
   useAui,
 } from "@assistant-ui/react";
 import type {
-  ChatModelRunOptions,
-  ChatModelRunResult,
   CompleteAttachment,
   ExportedMessageRepositoryItem,
   GenericThreadHistoryAdapter,
@@ -25,12 +23,13 @@ import {
   CONVERSATION_PAGE_SIZE,
   conversationService,
 } from "@/services/conversationService";
-import type { WorkbenchPins } from "@/types/conversation";
+import type { ConversationListPage, WorkbenchPins } from "@/types/conversation";
 import { getConversationDateBoundaries } from "@/lib/conversationViewport";
 import { toMessageCreatedAt } from "@/lib/messageDate";
 import { buildHistoricalMessageTiming } from "@/lib/messageTiming";
 import {
   appendClarificationPart,
+  parseClarificationResponse,
   isClarificationFallback,
 } from "@/lib/clarification";
 import { stripAnsiControlSequences } from "@/lib/ansi";
@@ -57,7 +56,6 @@ import {
   searchImagesRegistry,
   isReasoningChunkType,
   skillFileUploadsRegistry,
-  remoteChatModelAdapter,
   parseStepTokenCount,
   parsePlan,
   parsePlanStepUpdate,
@@ -203,8 +201,12 @@ const toToolSearchItem = (value: unknown) => {
         sourceType:
           typeof item.source_type === "string" ? item.source_type : undefined,
         filename: filename || undefined,
-        publishedDate: typeof item.published_date === "string" ? item.published_date : undefined,
-        downloadUrl: typeof item.download_url === "string" ? item.download_url : undefined,
+        publishedDate:
+          typeof item.published_date === "string"
+            ? item.published_date
+            : undefined,
+        downloadUrl:
+          typeof item.download_url === "string" ? item.download_url : undefined,
         sourceFile: sourceFile || imageMetadata?.source_file || undefined,
         objectName:
           typeof item.object_name === "string" ? item.object_name : undefined,
@@ -212,7 +214,7 @@ const toToolSearchItem = (value: unknown) => {
         toolSign,
         isImage: Boolean(imageMetadata),
         retrievalHighlightTerms: getRetrievalHighlightTerms(item.score_details),
-                ...getSourceAttributes(item.search_type, item.score_details),
+        ...getSourceAttributes(item.search_type, item.score_details),
       }
     : null;
 };
@@ -340,9 +342,7 @@ export class RemoteConversationHistoryAdapter implements ThreadHistoryAdapter {
     >
   ) {}
 
-  async load(): Promise<
-    ExportedMessageRepository & { unstable_resume?: boolean }
-  > {
+  async load(): Promise<ExportedMessageRepository> {
     const loadGeneration = ++this.loadGeneration;
     // Historical threads may be cached by assistant-ui, so plan state is
     // cached independently by backend conversation ID. Parsing below updates
@@ -380,6 +380,25 @@ export class RemoteConversationHistoryAdapter implements ThreadHistoryAdapter {
     let assistantIdx = 0;
 
     const historyMessages = collapseRefreshUserMessages(detail.message);
+    const clarificationResponses = new Map<
+      string,
+      NonNullable<ReturnType<typeof parseClarificationResponse>>
+    >(
+      historyMessages.flatMap((message) => {
+        const response =
+          message.role === "user"
+            ? parseClarificationResponse(message.clarification_response)
+            : null;
+        return response
+          ? [
+              [
+                `${response.source_message_id}:${response.unit_index}`,
+                response,
+              ] as const,
+            ]
+          : [];
+      })
+    );
 
     for (const [messageIndex, msg] of historyMessages.entries()) {
       // Resolve a stable messageId first — every per-message side store
@@ -1142,7 +1161,8 @@ export class RemoteConversationHistoryAdapter implements ThreadHistoryAdapter {
               content,
               part.content,
               part.unit_index,
-              msg.status === "completed"
+              msg.status === "completed",
+              clarificationResponses.get(`${msg.message_id}:${part.unit_index}`)
             );
             continue;
           }
@@ -1360,6 +1380,15 @@ export class RemoteConversationHistoryAdapter implements ThreadHistoryAdapter {
         content.push({ type: "text", text: "" });
       }
 
+      // Preserve the running answer boundary before its first visible token.
+      if (
+        msg.role === "assistant" &&
+        detail.streaming_message?.status === "streaming" &&
+        msg.message_id === detail.streaming_message.message_id &&
+        content.length === 0
+      ) {
+        content.push({ type: "text", text: "" });
+      }
       if (content.length === 0 && attachments.length === 0) {
         // Still track assistant index even if no content (for registry alignment)
         if (msg.role === "assistant") assistantIdx++;
@@ -1417,41 +1446,9 @@ export class RemoteConversationHistoryAdapter implements ThreadHistoryAdapter {
         planRegistry.set(restoredPlan);
       }
     }
-    return {
-      ...repository,
-      unstable_resume: detail.streaming_message?.status === "streaming",
-    };
-  }
-
-  async *resume(
-    options: ChatModelRunOptions
-  ): AsyncGenerator<ChatModelRunResult, void> {
-    const remoteId = this.getRemoteId();
-    if (!remoteId) {
-      log.warn(
-        "[history-adapter] Cannot resume without a remote conversation ID"
-      );
-      return;
-    }
-
-    const custom = (options.runConfig?.custom ?? {}) as Record<string, unknown>;
-    const resumedRun = remoteChatModelAdapter.run({
-      ...options,
-      runConfig: {
-        ...options.runConfig,
-        custom: {
-          ...custom,
-          threadId: remoteId,
-          resume: true,
-        },
-      },
-    });
-
-    if (Symbol.asyncIterator in resumedRun) {
-      yield* resumedRun;
-      return;
-    }
-    yield await resumedRun;
+    // The shared hook reconnects after loading; automatic resume appends
+    // another assistant below the head and breaks the retry branch.
+    return repository;
   }
 
   // `append` is intentionally a no-op: in the remote-thread-list flow, message
@@ -1479,7 +1476,7 @@ const toRemoteThreadMetadata = (
   // so the thread list can always group by recency. The timestamp is passed
   // through the `custom` slot because the installed @assistant-ui/react
   // (0.14.15) does not yet thread `lastMessageAt` through the runtime state.
-  const timestamp = item.update_time || item.create_time;
+  const timestamp = item.last_activity_time ?? item.create_time;
   return {
     remoteId: String(item.conversation_id),
     status: "regular",
@@ -1510,7 +1507,9 @@ const parseConversationListOffset = (after: string | undefined): number => {
     : 0;
 };
 
-const createHistoryProvider = (): FC<PropsWithChildren> => {
+const createHistoryProvider = (
+  loadDetail?: import("@/types/conversation").ConversationDetailReader
+): FC<PropsWithChildren> => {
   const Provider: FC<PropsWithChildren> = ({ children }) => {
     const aui = useAui();
 
@@ -1518,7 +1517,13 @@ const createHistoryProvider = (): FC<PropsWithChildren> => {
       () =>
         new RemoteConversationHistoryAdapter(
           () => aui.threadListItem.getState().remoteId,
-          () => aui.threadListItem.initialize()
+          () => aui.threadListItem.initialize(),
+          loadDetail
+            ? () => {
+                const id = aui.threadListItem.getState().remoteId;
+                return id ? loadDetail(id) : Promise.resolve(undefined);
+              }
+            : undefined
         ),
       [aui]
     );
@@ -1715,36 +1720,79 @@ const waitForServerConversationId = async (
 export const createConversationThreadListAdapter = (
   conversationType: "agent_chat" | "workbench",
   pinStorageKey?: string,
-  loadPins: () => Promise<WorkbenchPins> = () => conversationService.getWorkbenchPins()
+  loadPins: () => Promise<WorkbenchPins> = () =>
+    conversationService.getWorkbenchPins(),
+  onDeleted?: (conversationId: number) => Promise<void>,
+  detailLoader?: import("@/types/conversation").ConversationDetailLoader
 ): RemoteThreadListAdapter => {
   const prefetchedConversationIds = new Set<string>();
+  let loadedCount = INITIAL_CONVERSATION_PAGE_SIZE;
+  let generation = 0;
   return {
-    unstable_Provider: createHistoryProvider(),
+    unstable_Provider: createHistoryProvider(detailLoader?.load),
 
     async list({ after } = {}): Promise<RemoteThreadListResponse> {
+      const currentGeneration = after === undefined ? ++generation : generation;
+      if (conversationType === "agent_chat") {
+        // Agent-chat history is fetched by Agent group and per-group cursors.
+        return { threads: [] };
+      }
       const { todayStartMs, weekStartMs } = getConversationDateBoundaries();
-      const offset = parseConversationListOffset(after);
-      const limit =
-        offset === 0 ? INITIAL_CONVERSATION_PAGE_SIZE : CONVERSATION_PAGE_SIZE;
-      const data = await conversationService.getList({
-        offset,
-        limit,
-        todayStartMs,
-        weekStartMs,
-        conversationType,
-      });
-      const nextOffset = offset + data.items.length;
+      const keyset = after?.startsWith("activity:")
+        ? after.slice(9)
+        : undefined;
+      let offset = keyset ? 0 : parseConversationListOffset(after);
+      let cursor = keyset;
+      let remaining =
+        after === undefined
+          ? Math.max(INITIAL_CONVERSATION_PAGE_SIZE, loadedCount)
+          : CONVERSATION_PAGE_SIZE;
+      let data: ConversationListPage | undefined;
+      const items: ConversationListItem[] = [];
+      let nextCursor: string | undefined;
+      while (remaining > 0) {
+        const limit = Math.min(100, remaining);
+        data = await conversationService.getList({
+          offset,
+          limit,
+          todayStartMs,
+          weekStartMs,
+          conversationType,
+          ...(cursor ? { cursor } : {}),
+        });
+        if (currentGeneration !== generation) return { threads: [] };
+        items.push(...data.items);
+        offset += data.items.length;
+        nextCursor = data.next_cursor
+          ? `activity:${data.next_cursor}`
+          : data.next_cursor === undefined && offset < data.metadata.total
+            ? String(offset)
+            : undefined;
+        remaining -= limit;
+        if (!nextCursor || !data.items.length) break;
+        cursor = nextCursor.startsWith("activity:")
+          ? nextCursor.slice(9)
+          : undefined;
+        if (cursor) offset = 0;
+      }
+      if (after === undefined) loadedCount = items.length;
+      else loadedCount += items.length;
 
       let pinnedMetadata: RemoteThreadMetadata[] = [];
-      if (offset === 0) {
+      if (after === undefined) {
         prefetchedConversationIds.clear();
-        if (conversationType === "workbench" && pinStorageKey) {
+        if (pinStorageKey) {
           const loadedIds = new Set(
-            data.items.map((item) => String(item.conversation_id))
+            items.map((item) => String(item.conversation_id))
           );
           try {
             const pins = await loadPins();
+            if (currentGeneration !== generation) return { threads: [] };
             pinnedMetadata = pins.items
+              .filter(
+                (item) =>
+                  (item.conversation_type ?? "workbench") === conversationType
+              )
               .filter((item) => !loadedIds.has(String(item.conversation_id)))
               .map(toRemoteThreadMetadata);
             for (const item of pinnedMetadata)
@@ -1758,7 +1806,14 @@ export const createConversationThreadListAdapter = (
 
       return {
         threads: [
-          ...data.items
+          ...items
+            .filter(
+              (item, index) =>
+                items.findIndex(
+                  (candidate) =>
+                    candidate.conversation_id === item.conversation_id
+                ) === index
+            )
             .filter(
               (item) =>
                 !prefetchedConversationIds.has(String(item.conversation_id))
@@ -1766,8 +1821,7 @@ export const createConversationThreadListAdapter = (
             .map(toRemoteThreadMetadata),
           ...pinnedMetadata,
         ],
-        nextCursor:
-          nextOffset < data.metadata.total ? String(nextOffset) : undefined,
+        nextCursor,
       };
     },
 
@@ -1819,6 +1873,7 @@ export const createConversationThreadListAdapter = (
         );
       }
       await conversationService.rename(conversationId, newTitle);
+      detailLoader?.invalidate(String(conversationId));
     },
 
     // The backend currently has no archive/unarchive endpoints, so these are
@@ -1849,10 +1904,17 @@ export const createConversationThreadListAdapter = (
         );
       }
       await conversationService.delete(conversationId);
+      await onDeleted?.(conversationId);
     },
 
     async fetch(threadId: string): Promise<RemoteThreadMetadata> {
-      const detail = await conversationService.getById(threadId);
+      const detail = await (detailLoader?.load ?? conversationService.getById)(
+        threadId
+      );
+      const lastActivityTime =
+        conversationType === "agent_chat"
+          ? detail.last_activity_time
+          : undefined;
 
       return toRemoteThreadMetadata({
         conversation_id: Number(detail.conversation_id),
@@ -1860,7 +1922,10 @@ export const createConversationThreadListAdapter = (
           detail.conversation_title ?? "Untitled conversation",
         agent_id: detail.agent_id,
         create_time: detail.create_time,
-        update_time: detail.create_time,
+        update_time: lastActivityTime ?? detail.create_time,
+        ...(lastActivityTime === undefined
+          ? {}
+          : { last_activity_time: lastActivityTime }),
       });
     },
 

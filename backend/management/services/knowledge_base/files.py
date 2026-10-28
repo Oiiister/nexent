@@ -7,24 +7,24 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from consts.const import ASSET_OWNER_ATTACHMENTS_PREFIX
-from consts.error_code import ErrorCode
-from consts.exceptions import AppException
-from database.attachment_db import delete_file, file_exists
-from database.knowledge_db import get_knowledge_record
-from database.knowledge_file_lifecycle_db import list_file_records
-from database.knowledge_storage_object_db import list_committed_storage_objects
+from contracts.constants.constants import ASSET_OWNER_ATTACHMENTS_PREFIX
+from contracts.errors.codes import ErrorCode
+from contracts.errors.exceptions import AppException
+from management.db.file.attachment import delete_file, file_exists
+from management.db.knowledge_base.repository import get_knowledge_record
+from management.db.knowledge_base.file_lifecycle import list_file_records
+from management.db.knowledge_base.storage_object import list_committed_storage_objects
 from fastapi import Depends, Path, Query
 from management.services.knowledge_base.common import get_vector_db_core, logger
 from management.services.knowledge_base.status import get_all_files_status
 from nexent.vector_database.base import VectorDatabaseCore
-from services.knowledge_storage_service import (
+from management.services.knowledge_base.storage import (
     release_storage_charge,
     resolve_storage_reference,
 )
-from services.redis_service import get_redis_service
-from utils.file_management_utils import get_file_size
-from utils.storage_key_utils import build_preview_pdf_object_key
+from management.services.knowledge_base.task_state import get_redis_service
+from management.services.file.upload import get_file_size
+from management.services.file.preview import build_preview_pdf_object_key
 
 KNOWLEDGE_BASE_DELETE_BLOCKING_STATUSES = frozenset(
     {

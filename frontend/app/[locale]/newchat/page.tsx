@@ -24,10 +24,11 @@ import {
 import { Chat } from "./assistant-ui/chat";
 import type { ChatMode } from "./assistant-ui/composer";
 import { ThreadListSidebar } from "./assistant-ui/threadlist-sidebar";
+import toolbarStyles from "@/components/common/ConversationToolbar.module.css";
 import { useRecentAgentIds } from "./assistant-ui/use-recent-agent-ids";
 import {
   cacheHistoricalChatMode,
-  conversationThreadListAdapter,
+  createConversationThreadListAdapter,
   generateConversationTitle,
   restoreHistoricalChatMode,
   restoreHistoricalPlan,
@@ -48,8 +49,14 @@ import {
   writeLastChatViewConversation,
   type LastChatViewState,
 } from "./last-chat-view";
-import { SidebarProvider } from "@/components/ui/sidebar";
+import { ConversationSidebarProvider } from "@/components/common/ConversationSidebarProvider";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { useAuthorizationContext } from "@/components/providers/AuthorizationProvider";
+import {
+  ConversationModelControlsProvider,
+  useBindConversationModelThread,
+} from "@/features/model-controls/ConversationModelControlsProvider";
+import { ConversationLoadingBoundary } from "./components/ConversationLoadingBoundary";
 import { message } from "antd";
 import type { Agent } from "@/types/agentConfig";
 import log from "@/lib/logger";
@@ -62,7 +69,16 @@ import { useConfig } from "@/hooks/useConfig";
 import { ServerDictationAdapter } from "./adapter/server-dictation-adapter";
 import type { STTModelConfig } from "@/types/modelConfig";
 import { conversationService } from "@/services/conversationService";
+import { useQueryClient } from "@tanstack/react-query";
+import { createConversationDetailLoader } from "@/lib/conversationDetails";
+import type { ConversationDetailLoader } from "@/types/conversation";
+import { getWorkbenchPinStorageKey } from "./assistant-ui/thread-pins";
+import {
+  removeDeletedWorkbenchPins,
+  workbenchPinsQueryKey,
+} from "@/lib/workbenchPins";
 import { useTranslation } from "react-i18next";
+import { useConversationResume } from "@/hooks/chat/useConversationResume";
 import { useConversationRouteGuard } from "@/features/workbench/hooks/useConversationRouteGuard";
 import type {
   ConversationKnowledgeScope,
@@ -98,7 +114,53 @@ export default function Home() {
 }
 
 const PersistentChatHome: FC = () => {
-  useConversationRouteGuard("agent_chat");
+  const { user } = useAuthorizationContext();
+  const queryClient = useQueryClient();
+  const identity = JSON.stringify([user?.tenantId, user?.id]);
+  const conversationDetails = useMemo(
+    () => createConversationDetailLoader(queryClient, identity),
+    [queryClient, identity]
+  );
+  useConversationRouteGuard("agent_chat", conversationDetails.load);
+  const detailLeases = useRef(new Map<ConversationDetailLoader, number>());
+  useEffect(() => {
+    const leases = detailLeases.current;
+    leases.set(conversationDetails, (leases.get(conversationDetails) ?? 0) + 1);
+    return () => {
+      leases.set(
+        conversationDetails,
+        (leases.get(conversationDetails) ?? 1) - 1
+      );
+      // Strict Mode replays setup before this cleanup of the shared snapshot.
+      queueMicrotask(() => {
+        if (leases.get(conversationDetails) === 0) {
+          conversationDetails.clear();
+          leases.delete(conversationDetails);
+        }
+      });
+    };
+  }, [conversationDetails]);
+  const pinScope = user
+    ? getWorkbenchPinStorageKey(user.id, user.tenantId)
+    : undefined;
+  const threadListAdapter = useMemo(
+    () =>
+      createConversationThreadListAdapter(
+        "agent_chat",
+        pinScope,
+        () =>
+          queryClient.ensureQueryData({
+            queryKey: workbenchPinsQueryKey(pinScope),
+            queryFn: () => conversationService.getWorkbenchPins(),
+          }),
+        (id) => {
+          conversationDetails.invalidate(String(id));
+          return removeDeletedWorkbenchPins(queryClient, [id]);
+        },
+        conversationDetails
+      ),
+    [pinScope, queryClient, conversationDetails]
+  );
   const [selectedAgent, setSelectedAgent] = useState<Agent | null>(null);
   const [requestedThreadId, setRequestedThreadId] = useState<
     string | undefined
@@ -106,6 +168,9 @@ const PersistentChatHome: FC = () => {
   const [deepLinkedAgentId, setDeepLinkedAgentId] = useState<number | null>(
     null
   );
+  const [restoreViewTarget, setRestoreViewTarget] = useState<
+    LastChatViewState | null | undefined
+  >(undefined);
   const consumedDeepLinkRef = useRef(false);
   // Read once at mount: what (if anything) should this refresh restore? Deep
   // links win, so this is null whenever the URL carries linking parameters.
@@ -123,21 +188,38 @@ const PersistentChatHome: FC = () => {
     const searchParams = new URLSearchParams(window.location.search);
     const threadId =
       searchParams.get("thread_id") ?? searchParams.get("conversation_id");
+    conversationDetails.activate(threadId || lastChatView?.conversationId);
     setRequestedThreadId(threadId || undefined);
     const agentId = searchParams.get("agent_id");
-    setDeepLinkedAgentId(
+    const validAgentId =
       agentId && Number.isInteger(Number(agentId)) && Number(agentId) > 0
         ? Number(agentId)
-        : null
+        : null;
+    setDeepLinkedAgentId(validAgentId);
+    setRestoreViewTarget(
+      threadId
+        ? { conversationId: threadId }
+        : validAgentId
+          ? { agentId: String(validAgentId) }
+          : lastChatView
     );
-  }, []);
+  }, [conversationDetails, lastChatView]);
+
+  const handleThreadIdChange = useCallback(
+    (threadId: string | undefined) => {
+      conversationDetails.activate(threadId);
+      setRequestedThreadId(threadId);
+    },
+    [conversationDetails]
+  );
 
   const runtime: AssistantRuntime = useRemoteThreadListRuntime({
     runtimeHook: function useChatRuntime() {
       return useLocalChatRuntime(dictationAdapter);
     },
-    adapter: conversationThreadListAdapter,
+    adapter: threadListAdapter,
     threadId: requestedThreadId,
+    onThreadIdChange: handleThreadIdChange,
     // Return to the conversation the user was viewing before the refresh.
     // The runtime switches to it once the adapter is ready; when the stored
     // conversation no longer exists the switch fails silently and the page
@@ -198,22 +280,29 @@ const PersistentChatHome: FC = () => {
 
   const handleBack = useCallback(() => {
     setSelectedAgent(null);
+    setRestoreViewTarget(null);
     log.log(`[Home] Back to agent list`);
   }, []);
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
       <TooltipProvider>
-        <HomeContent
-          runtime={runtime}
-          selectedAgent={selectedAgent}
-          setSelectedAgent={setSelectedAgent}
-          isLoadingAgents={isLoadingAgents}
-          agents={agents}
-          onAgentSelected={handleAgentSelected}
-          onBack={handleBack}
-          isDictationConfigured={isDictationConfigured(modelConfig?.stt)}
-        />
+        <ConversationModelControlsProvider
+          key={JSON.stringify([user?.tenantId, user?.id])}
+        >
+          <HomeContent
+            conversationDetails={conversationDetails}
+            runtime={runtime}
+            selectedAgent={selectedAgent}
+            restoreViewTarget={restoreViewTarget}
+            setSelectedAgent={setSelectedAgent}
+            isLoadingAgents={isLoadingAgents}
+            agents={agents}
+            onAgentSelected={handleAgentSelected}
+            onBack={handleBack}
+            isDictationConfigured={isDictationConfigured(modelConfig?.stt)}
+          />
+        </ConversationModelControlsProvider>
       </TooltipProvider>
     </AssistantRuntimeProvider>
   );
@@ -224,8 +313,10 @@ const PersistentChatHome: FC = () => {
  * Must be rendered inside AssistantRuntimeProvider.
  */
 const HomeContent: FC<{
+  conversationDetails: ConversationDetailLoader;
   runtime: AssistantRuntime;
   selectedAgent: Agent | null;
+  restoreViewTarget: LastChatViewState | null | undefined;
   setSelectedAgent: (agent: Agent | null) => void;
   isLoadingAgents: boolean;
   agents: Agent[];
@@ -233,8 +324,10 @@ const HomeContent: FC<{
   onBack: () => void;
   isDictationConfigured: boolean;
 }> = ({
+  conversationDetails,
   runtime,
   selectedAgent,
+  restoreViewTarget,
   setSelectedAgent,
   isLoadingAgents,
   agents,
@@ -243,17 +336,33 @@ const HomeContent: FC<{
   isDictationConfigured,
 }) => {
   const { t } = useTranslation();
+  const bindModelThread = useBindConversationModelThread();
   const [chatMode, setChatMode] = useState<ChatMode>("execution");
   const [knowledgeScope, setKnowledgeScope] =
     useState<ConversationKnowledgeScope | null>(null);
   const [knowledgePreview, setKnowledgePreview] =
     useState<KnowledgeScopeEffectivePreview | null>(null);
-  const [knowledgeCapabilities, setKnowledgeCapabilities] =
-    useState<KnowledgeCapabilities | null>(null);
   const { enableAidpKnowledge } = useDeployment();
   // Observe the composer's catalog updates without starting another list request.
   const { dataUpdatedAt: knowledgeCatalogUpdatedAt } =
     useComposerKnowledgeBases(false, enableAidpKnowledge);
+  const knowledgeCapabilityKey = JSON.stringify([
+    selectedAgent?.id,
+    selectedAgent?.current_version_no,
+    enableAidpKnowledge,
+    knowledgeCatalogUpdatedAt,
+  ]);
+  const [knowledgeCapabilityState, setKnowledgeCapabilityState] = useState<{
+    key: string;
+    value: KnowledgeCapabilities | null;
+  }>({ key: knowledgeCapabilityKey, value: null });
+  if (knowledgeCapabilityState.key !== knowledgeCapabilityKey) {
+    setKnowledgeCapabilityState({ key: knowledgeCapabilityKey, value: null });
+  }
+  const knowledgeCapabilities =
+    knowledgeCapabilityState?.key === knowledgeCapabilityKey
+      ? knowledgeCapabilityState.value
+      : null;
   const [runtimeMetadata, setRuntimeMetadata] = useState<
     Record<string, unknown>
   >({});
@@ -272,7 +381,6 @@ const HomeContent: FC<{
 
   // All hooks must be called before any early returns
   const runtimeMainThreadId = useAuiState((s) => s.threads.mainThreadId);
-  const isLoading = useAuiState((s) => s.threads.isLoading);
   const isThreadLoading = useAuiState((s) => s.thread.isLoading);
   const isThreadRunning = useAuiState((s) => s.thread.isRunning);
   useEffect(() => {
@@ -281,8 +389,8 @@ const HomeContent: FC<{
     }
   }, [isThreadRunning, runtimeMainThreadId]);
   const threadItems = useAuiState((s) => s.threads.threadItems);
-  const ready =
-    runtimeMainThreadId !== undefined && !isLoading && !isThreadLoading;
+  // Sidebar metadata reloads must not unmount the active chat and composer.
+  const ready = runtimeMainThreadId !== undefined && !isThreadLoading;
 
   // Maintain thread ID state to pass conversation_id to the adapter reliably
   const [activeThreadId, setActiveThreadId] = useState<string | undefined>(
@@ -320,6 +428,11 @@ const HomeContent: FC<{
       const previous = map.get(threadId);
       const numericId = String(Number(serverId));
       if (previous !== numericId) {
+        // The existing callback marks new runs even when the query is empty.
+        // Historical runs already use a server key and must not be rebound.
+        if (initialQuestion !== undefined) {
+          bindModelThread?.(threadId, numericId);
+        }
         map.set(threadId, numericId);
         cacheHistoricalChatMode(numericId, chatMode);
         // Keep the sidebar and run configuration in sync with the server id.
@@ -347,7 +460,7 @@ const HomeContent: FC<{
           });
       }
     },
-    [chatMode]
+    [chatMode, bindModelThread]
   );
 
   const handleConversationRenamed = useCallback(
@@ -391,10 +504,47 @@ const HomeContent: FC<{
     serverConversationIdForActiveThread ??
     activeThread?.remoteId ??
     activeThreadId;
+  const restoredAgentId = restoreViewTarget?.agentId
+    ? Number(restoreViewTarget.agentId)
+    : restoreViewTarget?.conversationId &&
+        String(activeConversationId) === restoreViewTarget.conversationId &&
+        activeAgentId != null
+      ? Number(activeAgentId)
+      : null;
+  const restoredSidebarAgent =
+    restoredAgentId && Number.isSafeInteger(restoredAgentId)
+      ? (agents.find((agent) => Number(agent.id) === restoredAgentId) ?? null)
+      : null;
+  const sidebarSelectedAgent = selectedAgent ?? restoredSidebarAgent;
+  const [restoreFallbackReady, setRestoreFallbackReady] = useState(false);
+  useEffect(() => {
+    if (
+      !restoreViewTarget?.conversationId ||
+      sidebarSelectedAgent ||
+      isLoadingAgents
+    ) {
+      return;
+    }
+    const timer = setTimeout(() => setRestoreFallbackReady(true), 3000);
+    return () => clearTimeout(timer);
+  }, [
+    isLoadingAgents,
+    restoreViewTarget?.conversationId,
+    sidebarSelectedAgent,
+  ]);
+  const isRestoringSidebar =
+    restoreViewTarget === undefined ||
+    Boolean(
+      restoreViewTarget?.agentId && !sidebarSelectedAgent && isLoadingAgents
+    ) ||
+    Boolean(
+      restoreViewTarget?.conversationId &&
+      !sidebarSelectedAgent &&
+      !restoreFallbackReady
+    );
 
   useEffect(() => {
     if (!selectedAgent?.id) {
-      setKnowledgeCapabilities(null);
       return;
     }
 
@@ -403,10 +553,22 @@ const HomeContent: FC<{
     void conversationService
       .getKnowledgeCapabilities(Number(selectedAgent.id), versionNo)
       .then((capabilities) => {
-        if (!cancelled) setKnowledgeCapabilities(capabilities);
+        if (!cancelled) {
+          const matches =
+            capabilities?.agent_id === Number(selectedAgent.id) &&
+            (versionNo === undefined || capabilities.version_no === versionNo);
+          setKnowledgeCapabilityState({
+            key: knowledgeCapabilityKey,
+            value: matches ? capabilities : null,
+          });
+        }
       })
       .catch((error) => {
-        if (!cancelled) setKnowledgeCapabilities(null);
+        if (!cancelled)
+          setKnowledgeCapabilityState({
+            key: knowledgeCapabilityKey,
+            value: null,
+          });
         log.error(
           "[HomeContent] Failed to load knowledge capabilities:",
           error
@@ -416,7 +578,7 @@ const HomeContent: FC<{
     return () => {
       cancelled = true;
     };
-  }, [selectedAgent, knowledgeCatalogUpdatedAt]);
+  }, [selectedAgent, knowledgeCapabilityKey]);
 
   useEffect(() => {
     if (!activeThreadId) {
@@ -425,7 +587,11 @@ const HomeContent: FC<{
       return;
     }
 
-    if (knowledgeScopesRef.current.has(activeThreadId)) {
+    const numericConversationId = Number(activeConversationId);
+    if (
+      !Number.isInteger(numericConversationId) ||
+      numericConversationId <= 0
+    ) {
       setKnowledgeScope(knowledgeScopesRef.current.get(activeThreadId) ?? null);
       setKnowledgePreview(
         knowledgePreviewsRef.current.get(activeThreadId) ?? null
@@ -433,25 +599,19 @@ const HomeContent: FC<{
       return;
     }
 
-    const numericConversationId = Number(activeConversationId);
-    if (
-      !Number.isInteger(numericConversationId) ||
-      numericConversationId <= 0
-    ) {
-      knowledgeScopesRef.current.set(activeThreadId, null);
-      knowledgePreviewsRef.current.set(activeThreadId, null);
-      setKnowledgeScope(null);
-      setKnowledgePreview(null);
-      return;
-    }
-
     let cancelled = false;
+    const revision = ++knowledgeScopeSyncRevisionRef.current;
     setKnowledgeScope(null);
     setKnowledgePreview(null);
-    void conversationService
-      .getById(String(numericConversationId))
+    void conversationDetails
+      .load(String(numericConversationId))
       .then((conversation) => {
-        if (cancelled) return;
+        if (
+          cancelled ||
+          knowledgeScopeSavingRef.current ||
+          revision !== knowledgeScopeSyncRevisionRef.current
+        )
+          return;
         const restoredScope = conversation.knowledge_scope ?? null;
         knowledgeScopesRef.current.set(activeThreadId, restoredScope);
         knowledgePreviewsRef.current.set(activeThreadId, null);
@@ -467,7 +627,7 @@ const HomeContent: FC<{
     return () => {
       cancelled = true;
     };
-  }, [activeConversationId, activeThreadId]);
+  }, [activeConversationId, activeThreadId, conversationDetails]);
 
   // Resync the conversation's saved knowledge selection whenever the page
   // becomes visible again. Deletion cascades on the server, so a knowledge
@@ -486,8 +646,8 @@ const HomeContent: FC<{
         return;
       }
       const revision = ++knowledgeScopeSyncRevisionRef.current;
-      void conversationService
-        .getById(String(numericConversationId))
+      void conversationDetails
+        .refresh(String(numericConversationId))
         .then((conversation) => {
           if (
             cancelled ||
@@ -513,7 +673,7 @@ const HomeContent: FC<{
       cancelled = true;
       document.removeEventListener("visibilitychange", resyncKnowledgeScope);
     };
-  }, [activeConversationId, activeThreadId]);
+  }, [activeConversationId, activeThreadId, conversationDetails]);
 
   useEffect(() => {
     const numericConversationId = Number(activeConversationId);
@@ -528,8 +688,8 @@ const HomeContent: FC<{
     }
 
     let cancelled = false;
-    void conversationService
-      .getById(String(numericConversationId))
+    void conversationDetails
+      .load(String(numericConversationId))
       .then((conversation) => {
         if (cancelled) return;
         setRuntimeMetadata(conversation.runtime_metadata ?? {});
@@ -544,7 +704,7 @@ const HomeContent: FC<{
     return () => {
       cancelled = true;
     };
-  }, [activeConversationId]);
+  }, [activeConversationId, conversationDetails]);
 
   const handleRuntimeMetadataChange = useCallback(
     (value: Record<string, unknown>) => {
@@ -611,6 +771,7 @@ const HomeContent: FC<{
             numericConversationId,
             scope
           );
+          conversationDetails.invalidate(String(numericConversationId));
           nextPreview = result.effective_preview;
           showKnowledgeScopeWarnings(result.warnings);
         }
@@ -628,7 +789,13 @@ const HomeContent: FC<{
         knowledgeScopeSavingRef.current = false;
       }
     },
-    [activeConversationId, activeThreadId, showKnowledgeScopeWarnings, t]
+    [
+      activeConversationId,
+      activeThreadId,
+      showKnowledgeScopeWarnings,
+      t,
+      conversationDetails,
+    ]
   );
 
   const handleKnowledgeScopeResolved = useCallback(
@@ -797,85 +964,19 @@ const HomeContent: FC<{
     restoreHistoricalChatMode(conversationId);
   }, [activeConversationId, activeThreadId]);
 
-  // A route change tears down the local stream, while the backend keeps the
-  // conversation marked as streaming. Reconnect the assistant-ui runtime when
-  // the historical load reports that state.
-  useEffect(() => {
-    const numericConversationId = Number(activeConversationId);
-    if (
-      !ready ||
-      isThreadRunning ||
-      !activeThreadId ||
-      !Number.isInteger(numericConversationId) ||
-      numericConversationId <= 0 ||
-      resumedConversationIdsRef.current.has(numericConversationId)
-    ) {
-      return;
-    }
-
-    let cancelled = false;
-    void conversationService
-      .getById(String(numericConversationId))
-      .then((conversation) => {
-        if (
-          cancelled ||
-          conversation.streaming_message?.status !== "streaming" ||
-          resumedConversationIdsRef.current.has(numericConversationId)
-        ) {
-          return;
-        }
-
-        resumedConversationIdsRef.current.add(numericConversationId);
-        const messages = runtime.thread.getState().messages;
-        const parentId = messages.at(-1)?.id ?? null;
-        runtime.thread.resumeRun({
-          parentId,
-          sourceId: null,
-          runConfig: {
-            custom: {
-              threadId: String(numericConversationId),
-              ...(selectedAgent?.id ? { agentId: selectedAgent.id } : {}),
-              ...(selectedAgent?.current_version_no
-                ? { agentVersionNo: selectedAgent.current_version_no }
-                : {}),
-              onGenerationStopped: handleGenerationStopped,
-              enablePlan: chatMode === "planning",
-              resume: true,
-            },
-          },
-          stream: async function* (options) {
-            const resumedRun = remoteChatModelAdapter.run(options);
-            if (Symbol.asyncIterator in resumedRun) {
-              yield* resumedRun;
-            } else {
-              yield await resumedRun;
-            }
-          },
-        });
-      })
-      .catch((error) => {
-        if (!cancelled) {
-          resumedConversationIdsRef.current.delete(numericConversationId);
-          log.error(
-            `[HomeContent] Failed to resume conversation ${numericConversationId}:`,
-            error
-          );
-        }
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [
+  useConversationResume({
+    runtime,
     activeConversationId,
     activeThreadId,
-    chatMode,
-    isThreadRunning,
     ready,
-    runtime,
+    isThreadRunning,
     selectedAgent,
+    chatMode,
+    resumedConversationIdsRef,
     handleGenerationStopped,
-  ]);
+    loadDetail: conversationDetails.load,
+    invalidateDetail: conversationDetails.invalidate,
+  });
 
   // Publish the server conversation id registry to the thread-list adapter so
   // `generateTitle` can wait for the real backend id before issuing its
@@ -941,6 +1042,17 @@ const HomeContent: FC<{
     setSelectedAgent,
   ]);
 
+  const handleHistoryAgentSelected = useCallback(
+    (agentId: number) => {
+      shouldRestoreAgentRef.current = true;
+      const agent = agents.find(
+        (candidate) => Number(candidate.id) === agentId
+      );
+      if (agent) setSelectedAgent(agent);
+    },
+    [agents, setSelectedAgent]
+  );
+
   const handleAgentSelectedFromLanding = useCallback(
     async (agent: Agent) => {
       shouldRestoreAgentRef.current = true;
@@ -964,61 +1076,64 @@ const HomeContent: FC<{
   );
 
   return (
-    <div className="flex w-full h-full">
+    <div
+      data-agent-chat-page
+      className={`relative flex w-full h-full [&:has([data-floating-sidebar-trigger])_[data-agent-landing-title]]:pl-10 [&:has([data-agent-landing-title])_[data-floating-sidebar-trigger]]:top-[22px] ${toolbarStyles.page}`}
+    >
       <div className="shrink-0 h-full">
-        <SidebarProvider className="w-auto h-full">
+        <ConversationSidebarProvider className="w-auto h-full">
           <ThreadListSidebar
+            onHistoryAgentSelected={handleHistoryAgentSelected}
+            collapseToFloatingButton
             newChatDesign
-            activeThreadId={selectedAgent ? runtimeMainThreadId : undefined}
+            activeThreadId={
+              sidebarSelectedAgent ? runtimeMainThreadId : undefined
+            }
             generatedTitles={generatedTitles}
             serverConversationIds={serverConversationIds}
             onRenameSuccess={handleConversationRenamed}
             onPrepareNewConversation={handlePrepareNewConversation}
             onNewConversation={handleNewConversation}
-            selectedAgent={selectedAgent}
+            selectedAgent={sidebarSelectedAgent}
+            isRestoringView={isRestoringSidebar}
             onAgentSelected={handleAgentSwitched}
           />
-        </SidebarProvider>
+        </ConversationSidebarProvider>
       </div>
 
       <div className="flex min-h-0 flex-1 min-w-0 flex-col">
-        <div className="min-h-0 flex-1">
-          {ready ? (
-            <Chat
-              newChatDesign
-              generatedTitle={
-                activeThreadId ? generatedTitles.get(activeThreadId) : undefined
-              }
-              conversationId={
-                activeConversationId && Number(activeConversationId) > 0
-                  ? Number(activeConversationId)
-                  : undefined
-              }
-              isLoadingAgents={isLoadingAgents}
-              selectedAgent={selectedAgent}
-              onAgentSelected={handleAgentSelectedFromLanding}
-              onBack={handleThreadBack}
-              chatMode={chatMode}
-              onChatModeChange={handleChatModeChange}
-              composerTools={
-                <>
-                  <ComposerAttachment />
-                  <ComposerDictation configured={isDictationConfigured} />
-                </>
-              }
-              knowledgeScope={knowledgeScope}
-              knowledgePreview={knowledgePreview}
-              knowledgeCapabilities={knowledgeCapabilities}
-              onKnowledgeScopeChange={handleKnowledgeScopeChange}
-              runtimeMetadata={runtimeMetadata}
-              onRuntimeMetadataChange={handleRuntimeMetadataChange}
-            />
-          ) : (
-            <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-              {t("chat.threadList.loading")}
-            </div>
-          )}
-        </div>
+        <ConversationLoadingBoundary loading={!ready}>
+          <Chat
+            readOnly={!ready}
+            newChatDesign
+            generatedTitle={
+              activeThreadId ? generatedTitles.get(activeThreadId) : undefined
+            }
+            conversationId={
+              activeConversationId && Number(activeConversationId) > 0
+                ? Number(activeConversationId)
+                : undefined
+            }
+            isLoadingAgents={isLoadingAgents}
+            selectedAgent={selectedAgent}
+            onAgentSelected={handleAgentSelectedFromLanding}
+            onBack={handleThreadBack}
+            chatMode={chatMode}
+            onChatModeChange={handleChatModeChange}
+            composerTools={
+              <>
+                <ComposerAttachment />
+                <ComposerDictation configured={isDictationConfigured} />
+              </>
+            }
+            knowledgeScope={knowledgeScope}
+            knowledgePreview={knowledgePreview}
+            knowledgeCapabilities={knowledgeCapabilities}
+            onKnowledgeScopeChange={handleKnowledgeScopeChange}
+            runtimeMetadata={runtimeMetadata}
+            onRuntimeMetadataChange={handleRuntimeMetadataChange}
+          />
+        </ConversationLoadingBoundary>
       </div>
     </div>
   );

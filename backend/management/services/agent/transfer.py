@@ -15,51 +15,30 @@ import zipfile
 from collections import deque
 from typing import Dict, List, Optional
 
-from agents.create_agent_info import create_tool_config_list
-from consts.const import MODEL_CONFIG_MAPPING
-from consts.exceptions import ForbiddenError, SkillDuplicateError
-from consts.model import (
-    ExportAndImportAgentInfo,
-    ExportAndImportDataFormat,
-    MCPInfo,
-    SkillInstanceInfoRequest,
-    SkillResolution,
-    SkillZipEntry,
-    ToolInstanceInfoRequest,
-)
-from database import skill_db
-from database.agent_db import (
-    create_agent,
-    insert_related_agent,
-    is_system_agent,
-    query_all_agent_info_by_tenant_id,
-    query_sub_agent_relations,
-    query_sub_agents_id_list,
-    resolve_sub_agent_version_no,
-    search_agent_info_by_agent_id,
-)
-from database.group_db import query_group_ids_by_user
-from database.model_management_db import (
-    get_model_by_model_id,
-    get_model_id_by_display_name,
-)
-from database.remote_mcp_db import get_mcp_server_by_name_and_tenant
-from database.tool_db import create_or_update_tool_by_tool_info, query_all_tools
-from fastapi import Header
+from nexent.core.agent_names import validate_agent_name
+
+from management.services.agent.preparation.tools import create_tool_config_list
+from contracts.constants.constants import MODEL_CONFIG_MAPPING
+from contracts.errors.exceptions import ForbiddenError, SkillDuplicateError
+from contracts.agent import ExportAndImportAgentInfo, ExportAndImportDataFormat, MCPInfo
+from contracts.skill import SkillInstanceInfoRequest, SkillResolution, SkillZipEntry
+from contracts.tool import ToolInstanceInfoRequest
+from management.db.skill import repository as skill_db
+from management.db.agent.repository import create_agent, insert_related_agent, is_system_agent, query_all_agent_info_by_tenant_id, query_sub_agent_relations, query_sub_agents_id_list, resolve_sub_agent_version_no, search_agent_info_by_agent_id
+from management.db.identity.group import query_group_ids_by_user
+from management.db.model.repository import get_model_by_model_id, get_model_id_by_display_name
+from management.db.mcp.remote import get_mcp_server_by_name_and_tenant
+from management.db.tool.repository import create_or_update_tool_by_tool_info, query_all_tools
 from management.services.agent.naming import (
     check_agent_value_duplicate,
     generate_unique_agent_value,
 )
 from management.services.skill.service import SkillService
-from services.agent_version_service import publish_version_impl
-from services.prompt_template_service import (
-    SYSTEM_PROMPT_TEMPLATE_ID,
-    SYSTEM_PROMPT_TEMPLATE_NAME,
-)
-from utils.auth_utils import get_current_user_info
-from utils.config_utils import tenant_config_manager
+from management.services.agent.versions import publish_version_impl
+from contracts.authentication import AuthenticatedIdentity
+from management.services.configuration.tenant.settings import tenant_config_manager
 from management.services.skill.naming import generate_available_copy_skill_name
-from utils.str_utils import convert_list_to_string
+from management.utils.serialization import convert_list_to_string
 
 logger = logging.getLogger(__name__)
 
@@ -249,7 +228,7 @@ async def _export_agent_dict_core(
 
 async def export_agent_dict_impl(
     agent_id: int,
-    authorization: str = Header(None),
+    identity: AuthenticatedIdentity,
     version_no: int = 0,
 ) -> dict:
     """
@@ -257,13 +236,13 @@ async def export_agent_dict_impl(
 
     Args:
         agent_id (int): The ID of the agent to export.
-        authorization (str): User authentication information, obtained from the Header.
+        identity (AuthenticatedIdentity): User and tenant established by Gateway.
         version_no (int): Version to export. Default 0 = draft.
 
     Returns:
         dict: ExportAndImportDataFormat as a plain dict (via model_dump).
     """
-    user_id, tenant_id, _ = get_current_user_info(authorization)
+    user_id, tenant_id = identity.user_id, identity.tenant_id
     return await _export_agent_dict_core(
         root_agent_id=agent_id,
         tenant_id=tenant_id,
@@ -289,12 +268,12 @@ async def export_agent_dict_for_repository_impl(
 
 async def export_agent_impl(
     agent_id: int,
-    authorization: str = Header(None),
+    identity: AuthenticatedIdentity,
     version_no: int = 0,
 ) -> str:
     """Serialize export_agent_dict_impl output to a JSON string for download or ZIP embedding."""
     agent_dict = await export_agent_dict_impl(
-        agent_id, authorization, version_no=version_no
+        agent_id, identity, version_no=version_no
     )
     return json.dumps(agent_dict)
 
@@ -324,6 +303,8 @@ def _collect_skill_names_from_tree(
             version_no=current_version_no,
         )
         for inst in skill_instances:
+            if not inst.get("enabled", True):
+                continue
             skill_id = inst.get("skill_id")
             skill = skill_db.get_skill_by_id(skill_id, tenant_id)
             if skill:
@@ -398,6 +379,8 @@ async def export_agent_by_agent_id(
             agent_id=agent_id, tenant_id=tenant_id, version_no=version_no
         )
         for inst in skill_instances:
+            if not inst.get("enabled", True):
+                continue
             skill_id = inst.get("skill_id")
             skill = skill_db.get_skill_by_id(skill_id, tenant_id)
             if skill:
@@ -464,9 +447,7 @@ async def export_agent_by_agent_id(
         verification_config=agent_info.get("verification_config"),
         context_policy=agent_info.get("context_policy"),
         model_params_override=agent_info.get("model_params_override"),
-        duty_prompt=agent_info.get("duty_prompt"),
-        constraint_prompt=agent_info.get("constraint_prompt"),
-        few_shots_prompt=agent_info.get("few_shots_prompt"),
+        prompt=agent_info.get("prompt"),
         enabled=agent_info["enabled"],
         tools=tool_list,
         managed_agents=agent_relation_in_db,
@@ -475,8 +456,6 @@ async def export_agent_by_agent_id(
         business_logic_model_id=business_logic_model_id,
         business_logic_model_name=business_logic_model_display_name,
         skill_names=skill_names,
-        prompt_template_id=agent_info.get("prompt_template_id"),
-        prompt_template_name=agent_info.get("prompt_template_name"),
         greeting_message=agent_info.get("greeting_message"),
         example_questions=agent_info.get("example_questions"),
     )
@@ -485,7 +464,7 @@ async def export_agent_by_agent_id(
 
 async def import_agent_impl(
     agent_info: ExportAndImportDataFormat,
-    authorization: str = Header(None),
+    identity: AuthenticatedIdentity,
     force_import: bool = False,
     skill_name_to_id: Optional[Dict[str, int]] = None,
     resolve_name_conflicts: bool = False,
@@ -499,8 +478,11 @@ async def import_agent_impl(
         The backend import logic only consumes the tools that already
         exist for the current tenant.
     """
-    user_id, tenant_id, _ = get_current_user_info(authorization)
+    user_id, tenant_id = identity.user_id, identity.tenant_id
     agent_id = agent_info.agent_id
+
+    for imported in agent_info.agent_info.values():
+        validate_agent_name(imported.name)
 
     agent_stack = deque([agent_id])
     agent_id_set = set()
@@ -550,6 +532,7 @@ async def import_agent_by_agent_id(
     skip_duplicate_regeneration: bool = False,
     resolve_name_conflicts: bool = False,
 ):
+    validate_agent_name(import_agent_info.name)
     tool_list = []
 
     # query all tools in the current tenant
@@ -582,10 +565,6 @@ async def import_agent_by_agent_id(
     if import_agent_info.max_steps <= 0:
         raise ValueError(
             f"Invalid max steps: {import_agent_info.max_steps}. max steps must be greater than 0."
-        )
-    if not import_agent_info.name.isidentifier():
-        raise ValueError(
-            f"Invalid agent name: {import_agent_info.name}. agent name must be a valid python variable name."
         )
 
     # Resolve model_ids from the export payload.
@@ -636,10 +615,6 @@ async def import_agent_by_agent_id(
                 business_logic_model_id[0] if business_logic_model_id else None
             ),
             "business_logic_model_name": import_agent_info.business_logic_model_name,
-            "prompt_template_id": import_agent_info.prompt_template_id
-            or SYSTEM_PROMPT_TEMPLATE_ID,
-            "prompt_template_name": import_agent_info.prompt_template_name
-            or SYSTEM_PROMPT_TEMPLATE_NAME,
             "max_steps": import_agent_info.max_steps,
             "requested_output_tokens": import_agent_info.requested_output_tokens,
             "is_main_agent": getattr(import_agent_info, "is_main_agent", True),
@@ -655,9 +630,7 @@ async def import_agent_by_agent_id(
             "model_params_override": getattr(
                 import_agent_info, "model_params_override", None
             ),
-            "duty_prompt": import_agent_info.duty_prompt,
-            "constraint_prompt": import_agent_info.constraint_prompt,
-            "few_shots_prompt": import_agent_info.few_shots_prompt,
+            "prompt": import_agent_info.prompt,
             "enabled": import_agent_info.enabled,
             "group_ids": user_group_ids,
             "greeting_message": getattr(import_agent_info, "greeting_message", None),
@@ -691,7 +664,7 @@ async def import_agent_by_agent_id(
 
 async def export_agent_with_skills_impl(
     agent_id: int,
-    authorization: str,
+    identity: AuthenticatedIdentity,
     version_no: int = 0,
 ) -> dict:
     """Export an agent, returning a ZIP if it has skill instances, otherwise a plain dict.
@@ -700,7 +673,7 @@ async def export_agent_with_skills_impl(
       - A dict with {"_zip": True, "data": bytes, "filename": str} when the agent has skills
       - ExportAndImportDataFormat as a plain dict when the agent has no skills
     """
-    user_id, tenant_id, _ = get_current_user_info(authorization)
+    user_id, tenant_id = identity.user_id, identity.tenant_id
     if is_system_agent(agent_id, tenant_id) is True:
         raise ForbiddenError("System Agent cannot be exported")
 
@@ -710,11 +683,11 @@ async def export_agent_with_skills_impl(
 
     if not skill_zip_entries:
         return await export_agent_dict_impl(
-            agent_id, authorization, version_no=version_no
+            agent_id, identity, version_no=version_no
         )
 
     agent_json_str = await export_agent_impl(
-        agent_id, authorization, version_no=version_no
+        agent_id, identity, version_no=version_no
     )
 
     zip_buffer = io.BytesIO()
@@ -744,7 +717,7 @@ async def export_agent_with_skills_impl(
 async def import_agent_with_skills_impl(
     agent_info: "ExportAndImportDataFormat",
     skills: List[SkillZipEntry],
-    authorization: str,
+    identity: AuthenticatedIdentity,
     force_import: bool = False,
     skill_resolutions: Optional[List[SkillResolution]] = None,
     resolve_name_conflicts: bool = False,
@@ -755,9 +728,11 @@ async def import_agent_with_skills_impl(
     and renamed skills share the same ZIP creation path, while imported agent
     skill names are resolved to tenant-local skill IDs before creating instances.
     """
-    user_id, tenant_id, _ = get_current_user_info(authorization)
+    user_id, tenant_id = identity.user_id, identity.tenant_id
 
     # Validate every agent before creating any dependency skills.
+    for imported in agent_info.agent_info.values():
+        validate_agent_name(imported.name)
     catalog = {
         (tool["class_name"], tool["source"]): tool
         for tool in query_all_tools(tenant_id=tenant_id)
@@ -844,7 +819,7 @@ async def import_agent_with_skills_impl(
 
     agent_id_mapping = await import_agent_impl(
         agent_info,
-        authorization,
+        identity,
         force_import,
         skill_name_to_id=skill_name_to_id,
         resolve_name_conflicts=resolve_name_conflicts,
@@ -902,10 +877,10 @@ def build_skill_import_conflicts(
 
 def check_skill_conflicts_impl(
     skill_names: List[str],
-    authorization: str,
+    identity: AuthenticatedIdentity,
 ) -> List[Dict[str, str]]:
     """Check agent import skill names against the current tenant."""
-    _, tenant_id, _ = get_current_user_info(authorization)
+    tenant_id = identity.tenant_id
     existing_skill_names = {
         skill.get("name")
         for skill in skill_db.list_skills(tenant_id)

@@ -18,15 +18,9 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from consts.const import (
-    LANGUAGE,
-)
-from consts.model import ChunkCreateRequest, ChunkUpdateRequest
-from database.knowledge_db import (
-    get_knowledge_record,
-    update_knowledge_record,
-    update_last_summary_time,
-)
+from contracts.constants.constants import LANGUAGE
+from contracts.knowledge import ChunkCreateRequest, ChunkUpdateRequest
+from management.db.knowledge_base.repository import get_knowledge_record, update_knowledge_record, update_last_summary_time
 from fastapi import Body, Depends, Path, Query
 from fastapi.responses import StreamingResponse
 from management.services.knowledge_base.common import (
@@ -657,11 +651,11 @@ class ElasticSearchService(KnowledgeBaseDocumentDeletionService):
         index_names: List[str],
         tag_predicates: List[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
-        from services.tag_document_projection import (
+        from management.services.knowledge_base.tag_projection import (
             LOCAL_DOCUMENT_PROVIDER,
             decode_document_resource_id,
         )
-        from services.tag_management_service import TagManagementService
+        from management.services.tag.library import TagManagementService
 
         allowed_paths_by_index: Dict[str, set] = {}
         for index in index_names:

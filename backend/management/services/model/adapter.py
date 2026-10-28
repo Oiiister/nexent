@@ -1,3 +1,4 @@
+# Copyright (c) 2025-2026 Huawei Technologies Co., Ltd. All rights reserved.
 """Backend bridge: turn DB model configs into gateway adapters.
 Service factory functions keep their signatures but delegate adapter
 construction to the gateway via :func:`get_adapter_from_config`.
@@ -8,8 +9,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Optional
 
-from consts.const import MODEL_CONFIG_MAPPING
-from database.model_management_db import get_model_by_model_id
+from contracts.constants.constants import MODEL_CONFIG_MAPPING
+from management.db.model.repository import get_model_by_model_id
 from management.services.model.names import get_model_name_from_config
 from nexent import MessageObserver
 from nexent.core.gateway import (
@@ -21,7 +22,7 @@ from nexent.core.gateway import (
     get_gateway,
 )
 from nexent.core.gateway.registry import get_registry
-from utils.config_utils import tenant_config_manager
+from management.services.configuration.tenant.settings import tenant_config_manager
 
 logger = logging.getLogger("model_gateway_service")
 

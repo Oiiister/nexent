@@ -2,11 +2,13 @@
 
 import React from "react";
 import { screen } from "@testing-library/dom";
-import { render } from "@testing-library/react";
+import { act, render, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import Home from "../../app/[locale]/newchat/page";
+import { conversationService } from "@/services/conversationService";
+import type { KnowledgeCapabilities } from "@/types/knowledgeScope";
 
 const switchToNewThread = vi.fn().mockResolvedValue(undefined);
 const reloadThreads = vi.fn().mockResolvedValue(undefined);
@@ -28,12 +30,33 @@ const runtimeMock = {
 
 let runtimeState = {
   threads: {
-    mainThreadId: "main-thread",
+    mainThreadId: "main-thread" as string | undefined,
     isLoading: false,
-    threadItems: [] as Array<{ id: string; remoteId?: string }>,
+    threadItems: [] as Array<{
+      id: string;
+      remoteId?: string;
+      custom?: { agentId?: number | string };
+    }>,
   },
   thread: { isLoading: false, isRunning: false },
 };
+
+const sidebarState = vi.hoisted(() => ({
+  isRestoringView: undefined as boolean | undefined,
+  selectedAgentId: undefined as string | undefined,
+}));
+const queryClientMock = vi.hoisted(() => ({
+  ensureQueryData: vi.fn().mockResolvedValue(undefined),
+  fetchQuery: vi.fn(({ queryFn }: { queryFn: () => Promise<unknown> }) => queryFn()),
+  getQueryState: vi.fn(),
+  removeQueries: vi.fn(),
+  invalidateQueries: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock("@tanstack/react-query", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@tanstack/react-query")>();
+  return { ...actual, useQueryClient: () => queryClientMock };
+});
 
 const agent = {
   id: "41",
@@ -45,6 +68,12 @@ const agent = {
 type PageAgent = typeof agent;
 
 let capturedRuntimeOptions: Record<string, unknown> | undefined;
+let chatProps:
+  | {
+      knowledgeCapabilities?: KnowledgeCapabilities | null;
+      onAgentSelected: (agent: PageAgent) => void;
+    }
+  | undefined;
 
 vi.mock("@assistant-ui/react", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@assistant-ui/react")>();
@@ -75,34 +104,62 @@ vi.mock("next/navigation", () => ({
   useParams: vi.fn(() => ({ locale: "zh" })),
 }));
 
+vi.mock("@/components/providers/AuthorizationProvider", () => ({
+  useAuthorizationContext: () => ({ user: undefined }),
+}));
+
 vi.mock("../../app/[locale]/newchat/assistant-ui/chat", () => ({
   Chat: ({
     selectedAgent,
     onAgentSelected,
     onBack,
+    knowledgeCapabilities,
   }: {
     selectedAgent: PageAgent | null;
     onAgentSelected: (agent: PageAgent) => void;
     onBack: () => void;
-  }) => (
-    <>
-      {selectedAgent ? (
-        <div>
-          <div>Agent chat: {selectedAgent.display_name}</div>
-          <button onClick={onBack}>back to list</button>
-        </div>
-      ) : (
-        <div>
-          <div>Agent list</div>
-          <button onClick={() => onAgentSelected(agent)}>select agent</button>
-        </div>
-      )}
-    </>
-  ),
+    knowledgeCapabilities?: KnowledgeCapabilities | null;
+  }) => {
+    chatProps = { knowledgeCapabilities, onAgentSelected };
+    return (
+      <>
+        {selectedAgent ? (
+          <div>
+            <div>Agent chat: {selectedAgent.display_name}</div>
+            <input aria-label="chat draft" defaultValue="Keep this draft" />
+            <button onClick={onBack}>back to list</button>
+          </div>
+        ) : (
+          <div>
+            <div>Agent list</div>
+            <button onClick={() => onAgentSelected(agent)}>select agent</button>
+          </div>
+        )}
+      </>
+    );
+  },
 }));
 
 vi.mock("../../app/[locale]/newchat/assistant-ui/threadlist-sidebar", () => ({
-  ThreadListSidebar: () => <div>thread list</div>,
+  ThreadListSidebar: ({
+    selectedAgent,
+    isRestoringView,
+  }: {
+    selectedAgent?: PageAgent | null;
+    isRestoringView?: boolean;
+  }) => {
+    sidebarState.isRestoringView = isRestoringView;
+    sidebarState.selectedAgentId = selectedAgent?.id;
+    return (
+      <div>
+        {isRestoringView
+          ? "sidebar restoring"
+          : selectedAgent
+            ? "agent history sidebar"
+            : "discovery sidebar"}
+      </div>
+    );
+  },
 }));
 
 vi.mock("@/hooks/agent/usePublishedAgentList", () => ({
@@ -110,6 +167,9 @@ vi.mock("@/hooks/agent/usePublishedAgentList", () => ({
 }));
 vi.mock("@/hooks/chat/useConversationAgentHistory", () => ({
   useConversationAgentHistory: () => ({ data: undefined }),
+}));
+vi.mock("@/hooks/chat/useComposerResources", () => ({
+  useComposerKnowledgeBases: () => ({ dataUpdatedAt: 0 }),
 }));
 vi.mock("@/hooks/useConfig", () => ({
   useConfig: () => ({ modelConfig: undefined }),
@@ -130,12 +190,56 @@ const CONVERSATION_KEY = "nexent_last_chat_conversation_id";
 const AGENT_KEY = "nexent_last_chat_agent_id";
 
 describe("newchat refresh restore wiring", () => {
+  it.each([true, false])(
+    "keeps the mounted chat through list refresh while running=%s",
+    async (isRunning) => {
+      const page = render(<Home />);
+      await userEvent.click(await screen.findByText("select agent"));
+      const draft = screen.getByRole("textbox", { name: "chat draft" });
+      runtimeState.thread.isRunning = isRunning;
+      runtimeState.threads.isLoading = true;
+      page.rerender(<Home />);
+      expect(screen.getByRole("textbox", { name: "chat draft" })).toBe(draft);
+      expect(draft).toHaveValue("Keep this draft");
+      runtimeState.threads.isLoading = false;
+      page.rerender(<Home />);
+      expect(screen.getByRole("textbox", { name: "chat draft" })).toBe(draft);
+    }
+  );
+
+  it("still gates chat on missing identity and active history loading", async () => {
+    runtimeState.threads.mainThreadId = undefined;
+    const page = render(<Home />);
+    expect(
+      screen.getByText("Agent list").closest("[aria-busy]")
+    ).toHaveAttribute("aria-busy", "true");
+    runtimeState.threads.mainThreadId = "main-thread";
+    page.rerender(<Home />);
+    await userEvent.click(await screen.findByText("select agent"));
+    runtimeState.thread.isLoading = true;
+    page.rerender(<Home />);
+    expect(
+      screen.getByRole("textbox", { name: "chat draft" }).closest("[aria-busy]")
+    ).toHaveAttribute("aria-busy", "true");
+    runtimeState.thread.isLoading = false;
+    page.rerender(<Home />);
+    expect(screen.getByRole("textbox", { name: "chat draft" })).toBeVisible();
+  });
+
   beforeEach(() => {
     switchToNewThread.mockClear().mockResolvedValue(undefined);
     reloadThreads.mockClear().mockResolvedValue(undefined);
     initializeThread.mockClear();
     updateThreadCustom.mockClear();
     capturedRuntimeOptions = undefined;
+    chatProps = undefined;
+    sidebarState.isRestoringView = undefined;
+    sidebarState.selectedAgentId = undefined;
+    queryClientMock.ensureQueryData.mockClear().mockResolvedValue(undefined);
+    queryClientMock.invalidateQueries.mockClear().mockResolvedValue(undefined);
+    vi.mocked(conversationService.getKnowledgeCapabilities)
+      .mockReset()
+      .mockResolvedValue(null as unknown as KnowledgeCapabilities);
     window.sessionStorage.clear();
     runtimeState = {
       threads: {
@@ -154,6 +258,30 @@ describe("newchat refresh restore wiring", () => {
 
     expect(capturedRuntimeOptions?.threadId).toBeUndefined();
     expect(capturedRuntimeOptions?.initialThreadId).toBe("77");
+  });
+
+  it("keeps the discovery sidebar hidden until the saved conversation restores", async () => {
+    window.sessionStorage.setItem(CONVERSATION_KEY, "77");
+    const page = render(<Home />);
+
+    expect(await screen.findByText("sidebar restoring")).toBeVisible();
+    expect(screen.queryByText("discovery sidebar")).toBeNull();
+
+    runtimeState = {
+      threads: {
+        mainThreadId: "77",
+        isLoading: false,
+        threadItems: [{ id: "77", remoteId: "77", custom: { agentId: 41 } }],
+      },
+      thread: { isLoading: false, isRunning: false },
+    };
+    page.rerender(<Home />);
+
+    await waitFor(() =>
+      expect(screen.getByText("agent history sidebar")).toBeVisible()
+    );
+    expect(sidebarState.selectedAgentId).toBe(agent.id);
+    expect(sidebarState.isRestoringView).toBe(false);
   });
 
   it("starts on the landing when the user returns via navigation, not refresh", () => {
@@ -255,5 +383,70 @@ describe("newchat refresh restore wiring", () => {
     // stored — only the agent selection survives the refresh.
     expect(window.sessionStorage.getItem(CONVERSATION_KEY)).toBeNull();
     expect(window.sessionStorage.getItem(AGENT_KEY)).toBe("41");
+  });
+
+  it("never exposes another Agent's capability while loading, after failure or a late response", async () => {
+    const capability = {
+      agent_id: 41,
+      version_no: 1,
+      sources: { local: { enabled: true }, aidp: { enabled: false } },
+    } as KnowledgeCapabilities;
+    let finishPending!: (value: KnowledgeCapabilities) => void;
+    const getCapabilities = vi.mocked(
+      conversationService.getKnowledgeCapabilities
+    );
+    getCapabilities
+      .mockResolvedValueOnce(capability)
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishPending = resolve;
+          })
+      )
+      .mockRejectedValueOnce(new Error("capability unavailable"));
+    render(<Home />);
+    await userEvent.click(screen.getByText("select agent"));
+    await waitFor(() =>
+      expect(chatProps?.knowledgeCapabilities).toEqual(capability)
+    );
+    const second = {
+      ...agent,
+      id: "42",
+      agent_id: 42,
+      display_name: "Second Agent",
+    };
+    await act(async () => {
+      await chatProps!.onAgentSelected(second);
+    });
+    expect(chatProps?.knowledgeCapabilities).toBeNull();
+    await waitFor(() => expect(getCapabilities).toHaveBeenCalledWith(42, 1));
+    await act(async () => {
+      await chatProps!.onAgentSelected({ ...agent, current_version_no: 2 });
+    });
+    await waitFor(() => expect(getCapabilities).toHaveBeenCalledWith(41, 2));
+    await act(async () => {
+      finishPending({ ...capability, agent_id: 42 });
+    });
+    expect(chatProps?.knowledgeCapabilities).toBeNull();
+  });
+
+  it.each([
+    { agent_id: 99, version_no: 1 },
+    { agent_id: 41, version_no: 99 },
+  ])("rejects capability identity mismatch %j", async (identity) => {
+    vi.mocked(conversationService.getKnowledgeCapabilities).mockResolvedValue({
+      ...identity,
+      sources: { local: { enabled: true }, aidp: { enabled: false } },
+    } as KnowledgeCapabilities);
+    render(<Home />);
+    await userEvent.click(screen.getByText("select agent"));
+    await waitFor(() =>
+      expect(conversationService.getKnowledgeCapabilities).toHaveBeenCalledWith(
+        41,
+        1
+      )
+    );
+    await act(async () => {});
+    expect(chatProps?.knowledgeCapabilities).toBeNull();
   });
 });

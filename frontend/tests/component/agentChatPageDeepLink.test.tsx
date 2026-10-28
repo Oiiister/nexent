@@ -4,9 +4,24 @@ import React from "react";
 import { screen } from "@testing-library/dom";
 import { render } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import Home from "../../app/[locale]/newchat/page";
+
+const renderPage = () =>
+  render(
+    <QueryClientProvider client={new QueryClient()}>
+      <Home />
+    </QueryClientProvider>
+  );
+
+vi.mock("@/components/providers/AuthorizationProvider", () => ({
+  useAuthorizationContext: () => ({ user: { id: "user", tenantId: "tenant" } }),
+}));
+vi.mock("@/components/providers/deploymentProvider", () => ({
+  useDeployment: () => ({ enableAidpKnowledge: false }),
+}));
 
 const switchToNewThread = vi.fn();
 const reloadThreads = vi.fn();
@@ -108,6 +123,9 @@ vi.mock("@/hooks/agent/usePublishedAgentList", () => ({
 vi.mock("@/hooks/chat/useConversationAgentHistory", () => ({
   useConversationAgentHistory: () => ({ data: undefined }),
 }));
+vi.mock("@/hooks/chat/useComposerResources", () => ({
+  useComposerKnowledgeBases: () => ({ dataUpdatedAt: 0 }),
+}));
 vi.mock("../../app/[locale]/newchat/assistant-ui/agent-landing", () => ({
   AgentLandingPage: ({
     onSelectAgent,
@@ -149,7 +167,7 @@ describe("newchat Agent deep-link page wiring", () => {
     switchToNewThread.mockImplementation(
       () => new Promise<void>(() => undefined)
     );
-    render(<Home />);
+    renderPage();
 
     expect(
       await screen.findByText("Agent chat: Fixed Agent")
@@ -160,7 +178,7 @@ describe("newchat Agent deep-link page wiring", () => {
   it("consumes the deep link once and keeps manual selection working", async () => {
     switchToNewThread.mockResolvedValue(undefined);
     const user = userEvent.setup();
-    render(<Home />);
+    renderPage();
 
     expect(
       await screen.findByText("Agent chat: Fixed Agent")
@@ -204,7 +222,7 @@ describe("newchat Agent deep-link page wiring", () => {
         })
     );
     const user = userEvent.setup();
-    render(<Home />);
+    renderPage();
     await screen.findByText("Agent chat: Fixed Agent");
 
     await user.click(screen.getByRole("button", { name: "back to list" }));

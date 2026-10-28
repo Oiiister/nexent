@@ -17,21 +17,10 @@ import json
 import time
 from typing import Any, Dict, Optional
 
-from consts.const import (
-    DOCUMENT_DELETE_DRAIN_TIMEOUT_S,
-    DOCUMENT_DELETE_RETRY_INTERVAL_S,
-)
-from database.attachment_db import delete_file
-from database.knowledge_db import (
-    get_knowledge_record,
-    update_last_doc_update_time,
-)
-from database.knowledge_file_lifecycle_db import (
-    create_delete_tombstone,
-    delete_file_record,
-    get_file_record,
-    transition_file_record,
-)
+from contracts.constants.environment import DOCUMENT_DELETE_DRAIN_TIMEOUT_S, DOCUMENT_DELETE_RETRY_INTERVAL_S
+from management.db.file.attachment import delete_file
+from management.db.knowledge_base.repository import get_knowledge_record, update_last_doc_update_time
+from management.db.knowledge_base.file_lifecycle import create_delete_tombstone, delete_file_record, get_file_record, transition_file_record
 from fastapi import Depends, Path, Query
 from management.services.knowledge_base.common import (
     get_vector_db_core,
@@ -44,11 +33,11 @@ from management.services.knowledge_base.management import (
 from management.services.knowledge_base.status import get_all_files_status
 from nexent.core.concurrency import run_blocking
 from nexent.vector_database.base import VectorDatabaseCore
-from services.knowledge_storage_service import (
+from management.services.knowledge_base.storage import (
     release_storage_charge,
     resolve_storage_reference,
 )
-from services.redis_service import get_redis_service
+from management.services.knowledge_base.task_state import get_redis_service
 
 _document_delete_tasks: Dict[str, asyncio.Task] = {}
 

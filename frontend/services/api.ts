@@ -55,6 +55,11 @@ export const API_ENDPOINTS = {
   },
   conversation: {
     list: `${API_BASE_URL}/conversation/list`,
+    agentGroups: `${API_BASE_URL}/conversation/agent_groups`,
+    agentGroupConversations: (groupKey: string) =>
+      `${API_BASE_URL}/conversation/agent_groups/${encodeURIComponent(groupKey)}/conversations`,
+    agentGroupConversationIds: (agentId: number) =>
+      `${API_BASE_URL}/conversation/agent_groups/${agentId}/conversation_ids`,
     workbenchPins: `${API_BASE_URL}/conversation/workbench_pins`,
     workbenchPin: (id: number) =>
       `${API_BASE_URL}/conversation/${id}/workbench_pin`,
@@ -179,19 +184,8 @@ export const API_ENDPOINTS = {
     updateLabels: `${API_BASE_URL}/tool/labels`,
   },
   prompt: {
-    generate: `${API_BASE_URL}/prompt/generate`,
     optimize: `${API_BASE_URL}/prompt/optimize`,
     optimizeFromDebug: `${API_BASE_URL}/prompt/optimize/from_debug`,
-  },
-  promptTemplates: {
-    list: `${API_BASE_URL}/prompt_templates`,
-    detail: (templateId: number) =>
-      `${API_BASE_URL}/prompt_templates/${templateId}`,
-    create: `${API_BASE_URL}/prompt_templates`,
-    update: (templateId: number) =>
-      `${API_BASE_URL}/prompt_templates/${templateId}`,
-    delete: (templateId: number) =>
-      `${API_BASE_URL}/prompt_templates/${templateId}`,
   },
   evaluationSets: {
     list: `${API_BASE_URL}/evaluation-sets`,

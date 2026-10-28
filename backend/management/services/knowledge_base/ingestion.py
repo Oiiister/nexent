@@ -6,12 +6,11 @@ import logging
 from typing import List
 
 import httpx
-from consts.const import DATA_PROCESS_SERVICE
-from consts.model import ProcessParams
-from database.knowledge_db import get_knowledge_record
-from utils.auth_utils import get_current_user_id
-from utils.knowledge_ingestion_errors import classify_ingestion_exception
-from utils.knowledge_telemetry import (
+from contracts.constants.environment import DATA_PROCESS_SERVICE
+from contracts.knowledge import ProcessParams
+from management.db.knowledge_base.repository import get_knowledge_record
+from infrastructure.ingestion.errors import classify_ingestion_exception
+from infrastructure.observability.knowledge import (
     inject_trace_context,
     set_span_attributes,
     trace_knowledge_operation,
@@ -44,18 +43,14 @@ def _data_process_error_result(
 
 
 @trace_knowledge_operation("knowledge.process.submit", "process.submit")
-async def trigger_data_process(files: List[dict], process_params: ProcessParams):
+async def trigger_data_process(files: List[dict], process_params: ProcessParams, tenant_id: str):
     """Trigger data processing service to handle uploaded files"""
     try:
         if not files:
             return None
 
-        # Get tenant_id from authorization for downstream task processing
-        tenant_id = None
-        try:
-            _, tenant_id = get_current_user_id(process_params.authorization)
-        except Exception as e:
-            logger.warning(f"Failed to get tenant_id from authorization: {e}")
+        if not tenant_id:
+            raise ValueError("Authenticated tenant is required")
 
         # Resolve embedding model from the knowledge base record (not request model_id)
         embedding_model_id = None
@@ -75,7 +70,7 @@ async def trigger_data_process(files: List[dict], process_params: ProcessParams)
             )
 
         # Build headers with authorization
-        headers = {"Authorization": f"Bearer {process_params.authorization}"}
+        headers = {"Authorization": process_params.authorization}
         telemetry_context = inject_trace_context()
         headers.update(telemetry_context)
 

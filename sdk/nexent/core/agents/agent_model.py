@@ -46,13 +46,16 @@ def copy_invocation_config(config: "AgentConfig") -> "AgentConfig":
     return deepcopy(config, memo)
 
 
-# Protocol type constants (must match backend/database/a2a_agent_db.py definitions)
+# Protocol type constants (must match backend/management/db/a2a/repository.py definitions)
 PROTOCOL_JSONRPC = "JSONRPC"
 PROTOCOL_HTTP_JSON = "HTTP+JSON"
 PROTOCOL_GRPC = "GRPC"
 
 
 class ModelConfig(BaseModel):
+    diagnostic_chunks_enabled: bool = Field(
+        default=False, description="Capture bounded content-free response chunk structure"
+    )
     cite_name: str = Field(description="Model alias")
     api_key: str = Field(description="API key", default="")
     model_name: str = Field(description="Model call name")
@@ -585,6 +588,7 @@ class ExternalA2AAgentConfig(BaseModel):
 
     agent_id: str = Field(description="External agent ID")
     name: str = Field(description="Agent display name")
+    invocation_name: Optional[str] = Field(default=None, description="Resolved runtime callable; original name is preserved")
     description: str = Field(description="Agent description for prompt", default="")
     url: str = Field(description="A2A endpoint URL")
     api_key: Optional[str] = Field(description="API key for authentication", default=None)
@@ -592,6 +596,7 @@ class ExternalA2AAgentConfig(BaseModel):
     protocol_version: str = Field(description="A2A protocol version", default="1.0")
     protocol_type: str = Field(description="Protocol type: JSONRPC, HTTP+JSON, or GRPC", default=PROTOCOL_JSONRPC)
     timeout: float = Field(description="Request timeout in seconds", default=300.0)
+    ssl_verify: bool = Field(description="Verify the peer TLS certificate", default=True)
     raw_card: Optional[Dict[str, Any]] = Field(
         description="Raw Agent Card containing skills and capabilities", default=None
     )
@@ -645,12 +650,14 @@ class ExternalA2AAgentConfig(BaseModel):
         return A2AAgentInfo(
             agent_id=self.agent_id,
             name=self.name,
+            invocation_name=self.invocation_name,
             url=self.url,
             api_key=self.api_key,
             transport_type=self.transport_type,
             protocol_version=self.protocol_version,
             protocol_type=self.protocol_type,
             timeout=self.timeout,
+            ssl_verify=self.ssl_verify,
             raw_card=self.raw_card,
             custom_headers=self.custom_headers,
         )

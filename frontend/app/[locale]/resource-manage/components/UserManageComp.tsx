@@ -62,6 +62,7 @@ import UserList from "./resources/UserList";
 import ApiKeyList from "./resources/ApiKeyList";
 import GroupList from "./resources/GroupList";
 import ModelList from "./resources/ModelList";
+import TagList from "./resources/TagList";
 import KnowledgeList from "./resources/KnowledgeList";
 import InvitationList from "./resources/InvitationList";
 import AgentList from "./resources/AgentList";
@@ -1092,7 +1093,11 @@ export default function UserManageComp() {
     data: tenantData,
     isLoading: tenantsLoading,
     refetch: refetchTenants,
-  } = useTenantList({ page: currentPage, page_size: DEFAULT_PAGE_SIZE });
+  } = useTenantList({
+    page: currentPage,
+    page_size: DEFAULT_PAGE_SIZE,
+    enabled: isSuperAdmin,
+  });
 
   // For non-super admins, automatically select their own tenant based on user.tenantId
   // This must be declared before useQuery that uses tenantId
@@ -1396,6 +1401,11 @@ export default function UserManageComp() {
                           key: "skills",
                           label: "Skills",
                           children: <SkillList tenantId={tenantId} />,
+                        },
+                        {
+                          key: "tags",
+                          label: t("tenantResources.tabs.tags"),
+                          children: <TagList tenantId={tenantId} />,
                         },
                         {
                           key: "invitations",

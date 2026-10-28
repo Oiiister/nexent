@@ -1,6 +1,8 @@
 // Copyright (c) 2025-2026 Huawei Technologies Co., Ltd. All rights reserved.
 
+import { t as translate } from "i18next";
 import type { RuntimeGenerationOverrides } from "@/features/model-controls/turnControls";
+import type { ClarificationResponse } from "@/types/clarification";
 import { API_ENDPOINTS, ApiError } from "./api";
 
 import { chatConfig } from "@/const/chatConfig";
@@ -8,6 +10,8 @@ import type {
   ConversationListResponse,
   ConversationListPage,
   ConversationListParams,
+  AgentConversationGroupPage,
+  AgentGroupConversationPage,
   ApiConversationDetail,
   ApiConversationResponse,
   WorkbenchPins,
@@ -36,6 +40,73 @@ const getWebSocketUrl = (endpoint: string): string => {
 };
 
 export const conversationService = {
+  async getAgentGroups(
+    params: {
+      limit?: number;
+      cursor?: string | null;
+      search?: string;
+      includeAgentIds?: readonly number[];
+      includeOther?: boolean;
+    } = {}
+  ): Promise<AgentConversationGroupPage> {
+    const query = new URLSearchParams({ limit: String(params.limit ?? 10) });
+    if (params.cursor) query.set("cursor", params.cursor);
+    if (params.search?.trim()) query.set("search", params.search.trim());
+    for (const agentId of params.includeAgentIds ?? []) {
+      query.append("include_agent_id", String(agentId));
+    }
+    if (params.includeOther) query.set("include_other", "true");
+    const response = await fetch(
+      `${API_ENDPOINTS.conversation.agentGroups}?${query.toString()}`
+    );
+    const data = await response.json();
+    if (!response.ok || data.code !== 0) {
+      throw new ApiError(
+        data.code || response.status,
+        data.message || data.detail
+      );
+    }
+    return data.data as AgentConversationGroupPage;
+  },
+
+  async getAgentGroupConversations(params: {
+    groupKey: string;
+    limit?: number;
+    cursor?: string | null;
+    search?: string;
+  }): Promise<AgentGroupConversationPage> {
+    const query = new URLSearchParams({ limit: String(params.limit ?? 10) });
+    if (params.cursor) query.set("cursor", params.cursor);
+    if (params.search?.trim()) query.set("search", params.search.trim());
+    const response = await fetch(
+      `${API_ENDPOINTS.conversation.agentGroupConversations(params.groupKey)}?${query.toString()}`
+    );
+    const data = await response.json();
+    if (!response.ok || data.code !== 0) {
+      throw new ApiError(
+        data.code || response.status,
+        data.message || data.detail
+      );
+    }
+    return data.data as AgentGroupConversationPage;
+  },
+
+  async getAgentConversationIds(agentId: number): Promise<string[]> {
+    const response = await fetch(
+      API_ENDPOINTS.conversation.agentGroupConversationIds(agentId)
+    );
+    const data = await response.json();
+    if (!response.ok || data.code !== 0) {
+      throw new ApiError(
+        data.code || response.status,
+        data.message || data.detail
+      );
+    }
+    return Array.isArray(data.data?.items)
+      ? data.data.items.map((id: number | string) => String(id))
+      : [];
+  },
+
   async getWorkbenchPins(): Promise<WorkbenchPins> {
     const response = await fetch(API_ENDPOINTS.conversation.workbenchPins);
     const data = await response.json();
@@ -86,6 +157,7 @@ export const conversationService = {
     if (params.conversationType) {
       query.set("conversation_type", params.conversationType);
     }
+    if (params.cursor) query.set("cursor", params.cursor);
     const response = await fetch(
       `${API_ENDPOINTS.conversation.list}?${query.toString()}`
     );
@@ -260,7 +332,11 @@ export const conversationService = {
 
       // If the signal is aborted before the request returns, return early
       if (signal?.aborted) {
-        return { code: -1, message: "请求已取消", data: [] };
+        return {
+          code: -1,
+          message: translate("ui.localization.requestCancelled"),
+          data: [],
+        };
       }
 
       const data = await response.json();
@@ -276,7 +352,11 @@ export const conversationService = {
         (error instanceof Error && error.name === "AbortError") ||
         signal?.aborted
       ) {
-        return { code: -1, message: "请求已取消", data: [] };
+        return {
+          code: -1,
+          message: translate("ui.localization.requestCancelled"),
+          data: [],
+        };
       }
       throw error;
     }
@@ -379,7 +459,7 @@ export const conversationService = {
 
     throw new ApiError(
       data.code || -1,
-      data.message || data.detail || "停止失败"
+      data.message || data.detail || translate("ui.localization.stopFailed")
     );
   },
 
@@ -1075,6 +1155,7 @@ export const conversationService = {
   async runAgent(
     params: {
       query: string;
+      clarification_response?: ClarificationResponse;
       conversation_id?: number;
       history: Array<{ role: string; content: string }>;
       files?: File[];
@@ -1136,6 +1217,13 @@ export const conversationService = {
         is_debug: params.is_debug || false,
         enable_plan: params.enable_plan || false,
       };
+      if (
+        !params.is_resume &&
+        !params.runtime_mode &&
+        params.clarification_response
+      ) {
+        requestParams.clarification_response = params.clarification_response;
+      }
       if (params.runtime_mode === "nl2skill") {
         requestParams.draft_snapshot = params.draft_snapshot;
         requestParams.language = params.language;
@@ -1319,7 +1407,7 @@ export const conversationService = {
       // If the error is caused by canceling the request, return a specific response instead of throwing an error
       if (error instanceof Error && error.name === "AbortError") {
         log.log("Agent请求已被取消");
-        throw new Error("请求已被取消");
+        throw new Error(translate("ui.localization.requestWasCancelled"));
       }
       // Other errors are thrown normally
       throw error;

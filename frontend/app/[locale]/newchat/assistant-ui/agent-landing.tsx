@@ -62,7 +62,7 @@ export const AgentLandingPage: FC<AgentLandingPageProps> = ({
   const { t, i18n } = useTranslation();
   const antdLocale = i18n.language?.startsWith("zh") ? antdZhCn : antdEnUs;
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(10);
+  const [pageSize, setPageSize] = useState(12);
   const [activeTab, setActiveTab] = useState<LandingTab>("all");
   const [favoriteIds, setFavoriteIds] = useState<number[]>([]);
   const [recentIds, setRecentIds] = useState<number[]>([]);
@@ -206,7 +206,10 @@ export const AgentLandingPage: FC<AgentLandingPageProps> = ({
 
   return (
     <div className="flex h-full flex-col gap-4 overflow-y-auto p-6">
-      <h1 className="text-[20px] leading-[28px] text-[#191919]">
+      <h1
+        data-agent-landing-title
+        className="text-[20px] leading-[28px] text-[#191919]"
+      >
         {t("chat.agentLanding.discoverTitle")}
       </h1>
 
@@ -251,7 +254,6 @@ export const AgentLandingPage: FC<AgentLandingPageProps> = ({
           <span>
             {t("chat.agentLanding.totalCount", { count: totalCount })}
           </span>
-          <span>{t("chat.agentLanding.selectedCount", { count: 0 })}</span>
         </div>
         <ConfigProvider locale={antdLocale}>
           <StandardPaginator
@@ -260,7 +262,7 @@ export const AgentLandingPage: FC<AgentLandingPageProps> = ({
             total={totalCount}
             showSizeChanger
             showQuickJumper
-            pageSizeOptions={[10, 20, 50]}
+            pageSizeOptions={[10, 12, 20, 50]}
             className="[&_.ant-pagination-options]:!contents [&_.ant-pagination-options>.ant-select]:!order-first [&_.ant-pagination-options>.ant-select]:!mx-2 [&_.ant-pagination-options-quick-jumper]:!order-last [&_.ant-pagination-options-quick-jumper]:!ml-2"
             onChange={(nextPage, nextPageSize) => {
               setPage(nextPage);

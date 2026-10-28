@@ -1,11 +1,12 @@
+# Copyright (c) 2025-2026 Huawei Technologies Co., Ltd. All rights reserved.
 """Canonical knowledge scope compatibility endpoint contract tests."""
 
 from copy import deepcopy
 
 import pytest
 
-from consts.exceptions import WorkbenchConfigVersionConflict
-from services import conversation_management_service as service
+from contracts.errors.exceptions import WorkbenchConfigVersionConflict
+from management.services.conversation import service as service
 
 
 def test_legacy_scope_endpoint_updates_canonical_config_only(mocker):

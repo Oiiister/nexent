@@ -11,73 +11,31 @@ from typing import (
     Optional,
 )
 
-from consts.agent_repository import (
-    STATUS_PENDING_REVIEW,
-    STATUS_REJECTED,
-    STATUS_SHARED,
-)
-from consts.const import (
-    CAN_EDIT_ALL_USER_ROLES,
-    PERMISSION_PRIVATE,
-    TOOL_TYPE_MAPPING,
-)
-from consts.exceptions import (
-    ForbiddenError,
-)
-from consts.model import (
-    ToolSourceEnum,
-)
-from database import (
-    skill_db,
-)
-from database.a2a_agent_db import (
-    get_server_agent_ids,
-)
-from database.agent_db import (
-    clear_agent_new_mark,
-    delete_agent_by_id,
-    delete_agent_relationship,
-    is_system_agent,
-    query_agent_info_by_ids,
-    query_agent_list_candidates_by_tenant_id,
-    query_all_agent_info_by_tenant_id,
-    query_sub_agents_id_list,
-    search_agent_id_by_agent_name,
-    search_agent_info_by_agent_id,
-)
-from database.agent_repository_db import (
-    list_agent_repository_by_agent_ids,
-)
-from database.agent_version_db import (
-    batch_search_version_names,
-    query_version_list,
-)
-from database.group_db import (
-    query_group_ids_by_user,
-)
-from database.tag_management_db import (
-    TagManagementDB,
-)
-from database.tool_db import (
-    delete_tools_by_agent_id,
-    search_tools_for_sub_agent,
-)
-from database.user_tenant_db import (
-    get_user_tenant_by_user_id,
-)
+from contracts.constants.constants import STATUS_PENDING_REVIEW, STATUS_REJECTED, STATUS_SHARED
+from contracts.constants.constants import CAN_EDIT_ALL_USER_ROLES, PERMISSION_PRIVATE
+from contracts.constants.constants import TOOL_TYPE_MAPPING
+from contracts.errors.exceptions import ForbiddenError
+from contracts.tool import ToolSourceEnum
+from management.db.skill import repository as skill_db
+from management.db.a2a.repository import get_server_agent_ids
+from management.db.agent.repository import clear_agent_new_mark, delete_agent_by_id, delete_agent_relationship, is_system_agent, query_agent_info_by_ids, query_agent_list_candidates_by_tenant_id, query_all_agent_info_by_tenant_id, query_sub_agents_id_list, search_agent_id_by_agent_name, search_agent_info_by_agent_id
+from management.db.agent.catalog import list_agent_repository_by_agent_ids
+from management.db.agent.version import batch_search_version_names, query_version_list
+from management.db.identity.group import query_group_ids_by_user
+from management.db.tag.repository import TagManagementDB
+from management.db.tool.repository import delete_tools_by_agent_id, search_tools_for_sub_agent
+from management.db.identity.user_tenant import get_user_tenant_by_user_id
 from management.services.agent.read import (
     apply_deleted_model_reason,
     apply_duplicate_name_availability_rules,
     check_agent_availability,
     project_agent_models,
 )
-from services.asset_owner_visibility import (
+from management.services.permission.asset_owner import (
     resolve_agent_list_permission,
 )
-from services.user_identity_service import enrich_cas_usernames
-from utils.str_utils import (
-    convert_string_to_list,
-)
+from management.services.permission.identity.display import enrich_cas_usernames
+from management.utils.serialization import convert_string_to_list
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +65,7 @@ async def delete_agent_impl(agent_id: int, tenant_id: str, user_id: str):
         delete_tools_by_agent_id(agent_id, tenant_id, user_id)
         skill_db.delete_skills_by_agent_id(agent_id, tenant_id, user_id)
         if is_tenant_owned_agent:
-            from services.tag_management_service import TagManagementService
+            from management.services.tag.library import TagManagementService
 
             TagManagementService.cleanup_resource_assignments(
                 tenant_id, "agent", str(agent_id), user_id

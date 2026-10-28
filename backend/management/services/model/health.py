@@ -1,10 +1,11 @@
+# Copyright (c) 2025-2026 Huawei Technologies Co., Ltd. All rights reserved.
 import logging
 from typing import Optional
 
 import httpx
-from consts.const import DOCKER_INTERNAL_HOST, LOCALHOST_IP, LOCALHOST_NAME
-from consts.model import ModelConnectStatusEnum
-from database.model_management_db import get_model_by_display_name, update_model_record
+from contracts.constants.constants import DOCKER_INTERNAL_HOST, LOCALHOST_IP, LOCALHOST_NAME
+from contracts.model import ModelConnectStatusEnum
+from management.db.model.repository import get_model_by_display_name, update_model_record
 from management.services.model.adapter import build_adapter_fresh
 from management.services.model.probe import (
     _embedding_url_candidates,
@@ -12,7 +13,7 @@ from management.services.model.probe import (
 )
 from nexent.core import MessageObserver
 from nexent.monitor import set_monitoring_context, set_monitoring_operation
-from services.voice_service import get_voice_service
+from management.services.model.voice import get_voice_service
 
 logger = logging.getLogger("model_health_service")
 

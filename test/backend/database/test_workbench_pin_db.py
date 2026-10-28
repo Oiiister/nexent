@@ -12,8 +12,8 @@ import pytest
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.sql.dml import Update
 
-from consts.exceptions import ConversationNotFoundError
-from database import workbench_pin_db as pins
+from contracts.errors.exceptions import ConversationNotFoundError
+from management.db.conversation import pins as pins
 
 STAMP = datetime(2026, 10, 1, tzinfo=timezone.utc)
 NEW_STAMP = datetime(2026, 10, 2, tzinfo=timezone.utc)
@@ -37,24 +37,27 @@ def session(monkeypatch):
 
 def conversation(stamp=STAMP):
     return SimpleNamespace(conversation_id=42, conversation_title="History", agent_id=3,
-                           workbench_pinned_at=stamp, created_by="user", update_time=STAMP)
+                           workbench_pinned_at=stamp, created_by="user", update_time=STAMP, last_activity_time=None)
 
 
-def result_row(record):
-    return record, 1234.9, 4567.8
+def result_row(record, conversation_type="workbench"):
+    return record, 1234.9, 4567.8, conversation_type
 
 
-def test_list_serializes_metadata_and_filters_owned_active_workbench_pins(session):
-    session.execute.return_value = [result_row(conversation())]
+@pytest.mark.parametrize("conversation_type", ["workbench", "agent_chat"])
+def test_list_serializes_metadata_and_filters_owned_active_pins(session, conversation_type):
+    session.execute.return_value = [result_row(conversation(), conversation_type)]
     assert pins.list_workbench_pins("user", "tenant") == [{
         "conversation_id": 42, "conversation_title": "History", "agent_id": 3,
-        "create_time": 1234, "update_time": 4567, "pinned_at": STAMP.isoformat(),
+        "conversation_type": conversation_type,
+        "create_time": 1234, "update_time": 4567, "last_activity_time": 1234, "pinned_at": STAMP.isoformat(),
     }]
     query = sql(session.execute.call_args.args[0])
-    for predicate in ("created_by = 'user'", "workbench_config IS NOT NULL",
-                      "workbench_config != 'null'::jsonb", "delete_flag = 'N'",
+    for predicate in ("created_by = 'user'", "delete_flag = 'N'",
                       "workbench_pinned_at IS NOT NULL"):
         assert predicate in query
+    assert "workbench_config IS NOT NULL" not in query
+    assert "CASE WHEN (nexent.conversation_record_t.workbench_config IS NULL) THEN 'agent_chat' ELSE 'workbench' END" in query
     assert "JOIN" not in query and "conversation_workbench_pin_t" not in query
     assert "ORDER BY nexent.conversation_record_t.workbench_pinned_at DESC, nexent.conversation_record_t.conversation_id DESC" in query
     session.add.assert_not_called()
@@ -66,7 +69,8 @@ def test_empty_pin_list_is_empty_without_fake_metadata(session):
 
 
 @pytest.mark.parametrize("pinned,stamp", [(True, None), (True, STAMP), (False, STAMP), (False, None)])
-def test_pin_transitions_are_idempotent_and_preserve_activity(session, pinned, stamp):
+@pytest.mark.parametrize("conversation_type", ["workbench", "agent_chat"])
+def test_pin_transitions_are_idempotent_and_preserve_activity(session, pinned, stamp, conversation_type):
     record = conversation(stamp)
     changes = pinned != (stamp is not None)
     session.scalar.side_effect = [record, NEW_STAMP] if pinned and changes else [record]
@@ -80,7 +84,7 @@ def test_pin_transitions_are_idempotent_and_preserve_activity(session, pinned, s
             assert "update_time=nexent.conversation_record_t.update_time" in sql(statement)
             assert "updated_by" not in str(statement)
             return None
-        return [result_row(record)] if record.workbench_pinned_at is not None else []
+        return [result_row(record, conversation_type)] if record.workbench_pinned_at is not None else []
 
     session.execute.side_effect = execute
     result = pins.set_workbench_pin(42, pinned, "user", "tenant")
@@ -89,7 +93,8 @@ def test_pin_transitions_are_idempotent_and_preserve_activity(session, pinned, s
     assert json.loads(lock.args[1]["scope"].removeprefix("workbench-pins:")) == ["user"]
     ownership = sql(session.scalar.call_args_list[0].args[0])
     assert "conversation_id = 42" in ownership and "created_by = 'user'" in ownership
-    assert "workbench_config IS NOT NULL" in ownership and "workbench_config != 'null'::jsonb" in ownership
+    assert "workbench_config IS NOT NULL" not in ownership
+    assert "delete_flag = 'N'" in ownership
     assert ownership.endswith("FOR UPDATE")
     writes = [c.args[0] for c in session.execute.call_args_list if isinstance(c.args[0], Update)]
     assert len(writes) == int(changes)
@@ -97,7 +102,7 @@ def test_pin_transitions_are_idempotent_and_preserve_activity(session, pinned, s
         assert "conversation_id = 42" in sql(writes[0]) and "created_by = 'user'" in sql(writes[0])
     if pinned and changes:
         clock = sql(session.scalar.call_args_list[1].args[0])
-        assert "greatest(clock_timestamp()," in clock
+        assert "greatest(timezone('UTC', clock_timestamp())," in clock
         assert "max(nexent.conversation_record_t.workbench_pinned_at)" in clock
         assert "INTERVAL '1 microsecond'" in clock and "created_by = 'user'" in clock
     assert record.update_time == STAMP
@@ -121,3 +126,34 @@ def test_database_update_failure_propagates_without_returning_success(session):
     with pytest.raises(RuntimeError, match="controlled database failure"):
         pins.set_workbench_pin(42, True, "user", "tenant")
     assert session.execute.call_count == 2
+
+
+def test_naive_utc_activity_epoch_never_uses_the_process_timezone(session):
+    class StoredTime(datetime):
+        def timestamp(self):
+            assert self.tzinfo is not None, "Naive storage time must be assigned UTC first"
+            return super().timestamp()
+
+    record = conversation()
+    record.last_activity_time = StoredTime(2026, 10, 1, 0, 0, 0, 123456)
+    session.execute.return_value = [result_row(record)]
+    result = pins.list_workbench_pins("user", "tenant")
+    assert result[0]["last_activity_time"] == int(STAMP.timestamp() * 1000) + 123
+
+
+
+def test_conversation_time_columns_all_use_native_timestamp():
+    assert not [column.name for column in pins.ConversationRecord.__table__.columns
+                if getattr(column.type, "timezone", False)]
+
+
+def test_naive_pin_iso_response_explicitly_uses_utc(session):
+    class StoredTime(datetime):
+        def isoformat(self, *args, **kwargs):
+            assert self.tzinfo is not None, "Native pin storage must be assigned UTC before serialization"
+            return super().isoformat(*args, **kwargs)
+
+    record = conversation(StoredTime(2026, 10, 21, 2, 3, 4, 123456))
+    session.execute.return_value = [result_row(record)]
+    result = pins.list_workbench_pins("user", "tenant")
+    assert result[0]["pinned_at"] == "2026-10-21T02:03:04.123456+00:00"

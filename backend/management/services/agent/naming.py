@@ -3,17 +3,17 @@
 """Shared tenant-scoped Agent naming rules and LLM regeneration."""
 
 import logging
-from typing import Optional
 
-from consts.const import LANGUAGE
-from database.agent_db import query_all_agent_info_by_tenant_id
+from nexent.core.agent_names import AGENT_NAME_MAX_LENGTH, validate_agent_name
+
+from contracts.constants.constants import LANGUAGE
+from management.db.agent.repository import query_all_agent_info_by_tenant_id
 from management.services.agent.prompt import (
-    normalize_prompt_generate_template_content,
+    load_default_generation_prompt,
 )
 from management.services.model.invocation import call_llm_for_system_prompt
 from nexent.core.agents.prompt.meta import (
     compose_name_regeneration,
-    load_generation_template,
 )
 
 logger = logging.getLogger(__name__)
@@ -51,7 +51,17 @@ def generate_unique_agent_value(
 ) -> str:
     """Find the first free numeric suffix using the existing tenant scope."""
     for counter in range(1, max_suffix_attempts + 1):
-        candidate = f"{base_value}_{counter}"
+        suffix = f"_{counter}"
+        if field_key == "name":
+            try:
+                validate_agent_name(base_value)
+                base = base_value
+            except ValueError:
+                base = "agent"
+            candidate = f"{base[:AGENT_NAME_MAX_LENGTH - len(suffix)]}{suffix}"
+            validate_agent_name(candidate)
+        else:
+            candidate = f"{base_value}{suffix}"
         if not check_agent_value_duplicate(
             field_key, candidate, tenant_id, exclude_agent_id, agents_cache
         ):
@@ -69,23 +79,9 @@ def regenerate_agent_value(
     language: str = LANGUAGE["ZH"],
     agents_cache: list[dict] | None = None,
     exclude_agent_id: int | None = None,
-    prompt_template_id: Optional[int] = None,
-    user_id: Optional[str] = None,
 ) -> str:
     """Regenerate one naming field with five attempts and suffix fallback."""
-    if user_id is not None:
-        from services.prompt_template_service import resolve_prompt_generate_template
-
-        template = resolve_prompt_generate_template(
-            tenant_id=tenant_id,
-            user_id=user_id,
-            language=language,
-            prompt_template_id=prompt_template_id,
-        )
-    else:
-        template = normalize_prompt_generate_template_content(
-            load_generation_template(language)
-        )
+    template = load_default_generation_prompt(language)
     values = {value for value in existing_values if value}
     empty_values = (
         "无" if (language or "").lower().startswith(LANGUAGE["ZH"]) else "None"
@@ -109,6 +105,8 @@ def regenerate_agent_value(
                 tenant_id=tenant_id,
             )
             candidate = (value or "").strip().splitlines()[0].strip()
+            if field_key == "name":
+                validate_agent_name(candidate)
             if candidate in values:
                 raise ValueError(f"Generated duplicate value '{candidate}'")
             return candidate

@@ -7,12 +7,12 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from apps import tag_management_app
-from consts.model import AgentTagAssignmentBatchRequest
-from database.agent_db import query_agent_info_by_ids
-from database.tag_management_db import TagManagementDB
-from services.tag_management_service import TagManagementService
-from services.tag_resource_adapters import AuthenticatedCaller
+from management.api.tag import tag_management as tag_management_app
+from contracts.tag import AgentTagAssignmentBatchRequest
+from management.db.agent.repository import query_agent_info_by_ids
+from management.db.tag.repository import TagManagementDB
+from management.services.tag.library import TagManagementService
+from management.services.tag.resources import AuthenticatedCaller
 
 
 @pytest.mark.parametrize("ids", [[], [0], [-1], [2**63], list(range(1, 502))])
@@ -45,7 +45,7 @@ def test_agent_batch_preserves_read_permissions_and_never_resolves_individually(
         {"agent_id": 3, "tenant_id": "tenant-a", "created_by": "other", "ingroup_permission": "NONE"},
     ])
     assignments = MagicMock(return_value={"2": [{"value_id": 9}], "1": []})
-    monkeypatch.setattr("services.tag_management_service.query_agent_info_by_ids", agents)
+    monkeypatch.setattr("management.services.tag.library.query_agent_info_by_ids", agents)
     monkeypatch.setattr(TagManagementDB, "list_resource_assignments_batch", assignments)
     monkeypatch.setattr(TagManagementService, "_resolve_assignment_resource", MagicMock(side_effect=AssertionError("N+1")))
     caller = AuthenticatedCaller("reader", "tenant-a", role="USER")
@@ -66,7 +66,7 @@ def test_agent_batch_query_is_tenant_draft_active_and_one_in_query(monkeypatch):
     query.all.return_value = []
     context = MagicMock()
     context.__enter__.return_value = session
-    monkeypatch.setattr("database.agent_db.get_db_session", lambda: context)
+    monkeypatch.setattr("management.db.agent.repository.get_db_session", lambda: context)
     assert query_agent_info_by_ids("tenant-a", [1, 2]) == []
     session.query.assert_called_once()
     query.all.assert_called_once()

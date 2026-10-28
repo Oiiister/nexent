@@ -2,14 +2,17 @@
 
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Tooltip } from "antd";
+import { App, Tooltip } from "antd";
 import { Settings } from "lucide-react";
 import i18n from "i18next";
 
+import log from "@/lib/logger";
+import { McpToolGroup } from "./McpToolGroup";
 import { ResourceDrawer } from "./ResourceDrawer";
 import { useToolList } from "@/hooks/agent/useToolList";
+import { useScanToolList } from "@/hooks/agent/useScanToolList";
 import { useMcpServerList } from "@/hooks/mcp/useMcpServerList";
 import { useAuthorizationContext } from "@/components/providers/AuthorizationProvider";
 import { useAgentStore } from "@/stores/agentStore";
@@ -108,26 +111,26 @@ const SOURCE_TABS: { key: string; labelKey: string; sourceValue: string }[] = [
 export interface ToolDrawerProps {
   open: boolean;
   onClose: () => void;
-  onOpenManageLabels?: () => void;
   currentAgentId?: number;
 }
 
-export function ToolDrawer({
-  open,
-  onClose,
-  onOpenManageLabels,
-  currentAgentId,
-}: ToolDrawerProps) {
+export function ToolDrawer({ open, onClose, currentAgentId }: ToolDrawerProps) {
   const { t } = useTranslation("common");
+  const { message } = App.useApp();
   const { confirm } = useConfirmModal();
 
-  const { selectableTools, invalidate } = useToolList({ enabled: open });
+  const { selectableTools } = useToolList({ enabled: open });
+  const scanTools = useScanToolList();
   const { user } = useAuthorizationContext();
   const tenantId = user?.tenantId || null;
   const { serverList: rawServers } = useMcpServerList({
     enabled: open,
     tenantId,
   });
+  const mcpServersByName = useMemo(
+    () => new Map(rawServers.map((server) => [server.service_name, server])),
+    [rawServers]
+  );
   const allMcpServerNames = useMemo(
     () => new Set(rawServers.map((s) => s.service_name)),
     [rawServers]
@@ -179,6 +182,15 @@ export function ToolDrawer({
   const [configTool, setConfigTool] = useState<Tool | null>(null);
   const [configParams, setConfigParams] = useState<ToolParam[]>([]);
   const [isSelectingAll, setIsSelectingAll] = useState(false);
+  const selectionEpoch = useRef(0);
+  const batchInFlight = useRef(false);
+
+  useEffect(() => {
+    return () => {
+      selectionEpoch.current += 1;
+      batchInFlight.current = false;
+    };
+  }, [open]);
 
   // Tools available in the active source tab (MCP tools filtered by visible server).
   const activeTabTools = useMemo(() => {
@@ -215,7 +227,17 @@ export function ToolDrawer({
           return false;
         if (kw) {
           const desc = getToolDescription(tool);
+          const server =
+            tool.source === TOOL_SOURCE_TYPES.MCP
+              ? mcpServersByName.get(tool.usage || "")
+              : undefined;
+          const matchService =
+            tool.source === TOOL_SOURCE_TYPES.MCP &&
+            [tool.usage, server?.description, ...(server?.tags ?? [])].some(
+              (value) => value?.toLowerCase().includes(kw)
+            );
           const matchSearch =
+            matchService ||
             tool.name.toLowerCase().includes(kw) ||
             (desc && desc.toLowerCase().includes(kw)) ||
             getToolLabels(tool).some((label: string) =>
@@ -226,7 +248,7 @@ export function ToolDrawer({
         return true;
       })
       .sort((a: Tool, b: Tool) => a.name.localeCompare(b.name));
-  }, [activeTabTools, search, resourceTags.matchedIds]);
+  }, [activeTabTools, search, resourceTags.matchedIds, mcpServersByName]);
 
   const selectedToolIds = useMemo(
     () => new Set(draftTools.map((tool) => parseInt(tool.id))),
@@ -278,15 +300,6 @@ export function ToolDrawer({
     draftTools,
   ]);
 
-  const allVisibleToolsSelected = useMemo(
-    () =>
-      selectableToolsInActiveTab.length > 0 &&
-      selectableToolsInActiveTab.every((tool: Tool) =>
-        selectedToolIds.has(parseInt(tool.id))
-      ),
-    [selectableToolsInActiveTab, selectedToolIds]
-  );
-
   const selectedChips = useMemo(
     () =>
       draftTools.map((tool) => ({
@@ -296,11 +309,48 @@ export function ToolDrawer({
     [draftTools]
   );
 
-  const total = filteredTools.length;
-  const pagedTools = useMemo(
-    () => filteredTools.slice((page - 1) * pageSize, page * pageSize),
-    [filteredTools, page, pageSize]
+  const mcpGroups = useMemo(() => {
+    const groups = new Map<string, Tool[]>();
+    if (activeTab === "mcp") {
+      filteredTools.forEach((tool) => {
+        const name = tool.usage || "";
+        const children = groups.get(name) ?? [];
+        children.push(tool);
+        groups.set(name, children);
+      });
+    }
+    return Array.from(groups, ([name, tools]) => ({ name, tools })).sort(
+      (a, b) => a.name.localeCompare(b.name)
+    );
+  }, [activeTab, filteredTools]);
+  const pagedGroups = useMemo(
+    () => mcpGroups.slice((page - 1) * pageSize, page * pageSize),
+    [mcpGroups, page, pageSize]
   );
+  const total = activeTab === "mcp" ? mcpGroups.length : filteredTools.length;
+  const pagedTools = useMemo(
+    () =>
+      activeTab === "mcp"
+        ? pagedGroups.flatMap((group) => group.tools)
+        : filteredTools.slice((page - 1) * pageSize, page * pageSize),
+    [activeTab, pagedGroups, filteredTools, page, pageSize]
+  );
+  const selectionScope = activeTab === "mcp" ? pagedTools : filteredTools;
+  const eligibleIds = useMemo(
+    () => new Set(selectableToolsInActiveTab.map((tool) => parseInt(tool.id))),
+    [selectableToolsInActiveTab]
+  );
+  const selectionTargets = selectionScope.filter(
+    (tool) =>
+      eligibleIds.has(parseInt(tool.id)) ||
+      selectedToolIds.has(parseInt(tool.id))
+  );
+  const allVisibleToolsSelected =
+    selectionTargets.length > 0 &&
+    selectionTargets.every((tool) => selectedToolIds.has(parseInt(tool.id)));
+  const partiallySelected =
+    !allVisibleToolsSelected &&
+    selectionTargets.some((tool) => selectedToolIds.has(parseInt(tool.id)));
   const toolAssignments = useToolTagAssignments(
     open,
     pagedTools.map((tool) => String(tool.id)),
@@ -416,63 +466,89 @@ export function ToolDrawer({
     ]
   );
 
-  const selectAllVisibleTools = useCallback(async () => {
-    if (isSelectingAll) return;
+  const selectTools = useCallback(
+    async (scope: Tool[]) => {
+      if (batchInFlight.current) return;
 
-    const currentSelectedIds = new Set(
-      draftTools.map((tool) => parseInt(tool.id))
-    );
-    const toolsToAdd = selectableToolsInActiveTab.filter(
-      (tool: Tool) => !currentSelectedIds.has(parseInt(tool.id))
-    );
-    if (toolsToAdd.length === 0) return;
-
-    setIsSelectingAll(true);
-    try {
-      const toolsWithParams = await Promise.all(
-        toolsToAdd.map(async (tool: Tool) => {
-          const initParams = await mergeInstanceParams(tool);
-          return initParams ? { ...tool, initParams } : null;
-        })
+      const currentSelectedIds = new Set(
+        draftTools.map((tool) => parseInt(tool.id))
       );
-      setDraftTools((prev) => {
-        const latestIds = new Set(prev.map((tool) => parseInt(tool.id)));
-        const names = new Set(prev.map((tool) => tool.name));
-        const additions = toolsWithParams.filter((tool): tool is Tool => {
-          if (!tool) return false;
-          if (
-            latestIds.has(parseInt(tool.id)) ||
-            names.has(tool.name) ||
-            hasMissingRequired(tool.initParams)
-          ) {
-            return false;
-          }
-          names.add(tool.name);
-          return true;
+      const toolsToAdd = scope.filter(
+        (tool: Tool) =>
+          eligibleIds.has(parseInt(tool.id)) &&
+          !currentSelectedIds.has(parseInt(tool.id))
+      );
+      if (toolsToAdd.length === 0) return;
+
+      batchInFlight.current = true;
+      const epoch = selectionEpoch.current;
+      setIsSelectingAll(true);
+      try {
+        const toolsWithParams = await Promise.all(
+          toolsToAdd.map(async (tool: Tool) => {
+            const initParams = await mergeInstanceParams(tool);
+            return initParams ? { ...tool, initParams } : null;
+          })
+        );
+        if (
+          epoch !== selectionEpoch.current ||
+          toolsWithParams.some((tool) => !tool)
+        )
+          return;
+        setDraftTools((prev) => {
+          const latestIds = new Set(prev.map((tool) => parseInt(tool.id)));
+          const names = new Set(prev.map((tool) => tool.name));
+          const additions = toolsWithParams.filter((tool): tool is Tool => {
+            if (!tool) return false;
+            if (
+              latestIds.has(parseInt(tool.id)) ||
+              names.has(tool.name) ||
+              hasMissingRequired(tool.initParams)
+            ) {
+              return false;
+            }
+            names.add(tool.name);
+            return true;
+          });
+
+          if (additions.length === 0) return prev;
+          return [...prev, ...additions];
         });
+      } catch (error) {
+        log.error("Failed to select tools:", error);
+        if (epoch === selectionEpoch.current)
+          message.error(t("toolPool.selectionFailed"));
+      } finally {
+        if (epoch === selectionEpoch.current) {
+          batchInFlight.current = false;
+          setIsSelectingAll(false);
+        }
+      }
+    },
+    [
+      draftTools,
+      hasMissingRequired,
+      eligibleIds,
+      mergeInstanceParams,
+      message,
+      t,
+    ]
+  );
 
-        if (additions.length === 0) return prev;
-        return [...prev, ...additions];
-      });
-    } finally {
-      setIsSelectingAll(false);
-    }
-  }, [
-    draftTools,
-    hasMissingRequired,
-    isSelectingAll,
-    mergeInstanceParams,
-    selectableToolsInActiveTab,
-  ]);
-
-  const deselectAllVisibleTools = useCallback(() => {
-    const visibleToolIds = new Set(
-      filteredTools.map((tool: Tool) => parseInt(tool.id))
-    );
-    setDraftTools((prev) =>
-      prev.filter((tool) => !visibleToolIds.has(parseInt(tool.id)))
-    );
-  }, [filteredTools]);
+  const selectScope = useCallback(
+    (scope: Tool[], checked: boolean) => {
+      if (batchInFlight.current) return;
+      if (checked) {
+        void selectTools(scope);
+        return;
+      }
+      const ids = new Set(scope.map((tool) => parseInt(tool.id)));
+      setDraftTools((prev) =>
+        prev.filter((tool) => !ids.has(parseInt(tool.id)))
+      );
+    },
+    [selectTools]
+  );
 
   const removeTool = useCallback((id: string) => {
     setDraftTools((prev) => prev.filter((tool) => String(tool.id) !== id));
@@ -480,13 +556,15 @@ export function ToolDrawer({
 
   const handleSelectAll = useCallback(
     (checked: boolean) => {
-      if (checked) void selectAllVisibleTools();
-      else deselectAllVisibleTools();
+      selectScope(selectionScope, checked);
     },
-    [deselectAllVisibleTools, selectAllVisibleTools]
+    [selectScope, selectionScope]
   );
 
   const onCloseDialog = useCallback(() => {
+    selectionEpoch.current += 1;
+    batchInFlight.current = false;
+    setIsSelectingAll(false);
     setSearch("");
     setActiveTab("local");
     setPage(1);
@@ -515,15 +593,83 @@ export function ToolDrawer({
     onCloseDialog();
   }, [draftTools, updateTools, onCloseDialog]);
 
+  const renderTool = (tool: Tool) => {
+    const isSelected = selectedToolIds.has(parseInt(tool.id));
+    const description = getToolDescription(tool);
+    const disabled = isToolDisabled(
+      tool.name,
+      isImageUnderstandingAvailable,
+      isVideoUnderstandingAvailable,
+      isEmbeddingAvailable,
+      isAudioUnderstandingAvailable
+    );
+    const disabledTooltipKey = disabled
+      ? getToolDisabledTooltipKey(
+          tool.name,
+          isImageUnderstandingAvailable,
+          isVideoUnderstandingAvailable,
+          isEmbeddingAvailable,
+          isAudioUnderstandingAvailable
+        )
+      : null;
+
+    const row = (
+      <ResourceItem
+        item={{
+          key: String(tool.id),
+          name: tool.name,
+          description,
+          tags: getToolLabels(tool),
+          raw: tool,
+        }}
+        selected={isSelected}
+        disabled={disabled}
+        onToggle={() => void handleToolToggle(tool)}
+        slots={{
+          renderTags: () => (
+            <ResourceAssignedTags
+              resourceType="tool"
+              resourceId={String(tool.id)}
+              tags={getToolLabels(tool)}
+              assignments={toolAssignments.data?.[String(tool.id)] ?? []}
+              refreshKey={resourceTags.revision}
+            />
+          ),
+          renderActions: () =>
+            !disabled ? (
+              <button
+                type="button"
+                onClick={() => void openConfigModal(tool)}
+                aria-label={t("toolPool.configure")}
+                title={t("toolPool.configure")}
+                className="flex size-7 shrink-0 items-center justify-center rounded-md text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600"
+              >
+                <Settings className="size-4" />
+              </button>
+            ) : null,
+        }}
+      />
+    );
+
+    return (
+      <div key={tool.id}>
+        {disabledTooltipKey ? (
+          <Tooltip title={t(disabledTooltipKey)} mouseEnterDelay={0.2}>
+            <div>{row}</div>
+          </Tooltip>
+        ) : (
+          row
+        )}
+      </div>
+    );
+  };
+
   return (
     <>
       <ResourceDrawer
         width="min(768px, 100vw)"
         bodyClassName={cn(styles.drawer, styles.tool)}
         title={t("resourcePicker.addTool", "添加工具")}
-        tagManagement={
-          onOpenManageLabels ? { onClick: onOpenManageLabels } : undefined
-        }
         open={open}
         searchPlaceholder={t("toolPool.searchToolsPlaceholder")}
         tagFilter={
@@ -533,6 +679,7 @@ export function ToolDrawer({
           />
         }
         confirmDisabled={
+          isSelectingAll ||
           resourceTags.filtering ||
           !!(resourceTags.predicates.length && resourceTags.error)
         }
@@ -549,10 +696,23 @@ export function ToolDrawer({
         onTabChange={setActiveTab}
         onRemoveSelected={removeTool}
         onSelectAll={handleSelectAll}
+        selectAllLabel={
+          activeTab === "mcp" ? t("toolPool.mcpSelectPage") : undefined
+        }
         allSelected={allVisibleToolsSelected}
+        partiallySelected={partiallySelected}
+        selectAllDisabled={isSelectingAll || selectionTargets.length === 0}
+        refreshLoading={scanTools.isPending}
         onRefresh={() => {
-          void invalidate();
-          if (open && pagedTools.length > 0) void toolAssignments.refetch();
+          if (scanTools.isPending) return;
+          scanTools.mutate(undefined, {
+            onSuccess: () => {
+              message.success(t("toolManagement.message.refreshSuccess"));
+            },
+            onError: () => {
+              message.error(t("toolManagement.message.refreshFailedRetry"));
+            },
+          });
         }}
         onPageChange={setPage}
         pageSize={pageSize}
@@ -563,80 +723,25 @@ export function ToolDrawer({
       >
         {total > 0 ? (
           <ResourceCollection>
-            {pagedTools.map((tool: Tool) => {
-              const isSelected = selectedToolIds.has(parseInt(tool.id));
-              const disabled = isToolDisabled(
-                tool.name,
-                isImageUnderstandingAvailable,
-                isVideoUnderstandingAvailable,
-                isEmbeddingAvailable,
-                isAudioUnderstandingAvailable
-              );
-              const disabledTooltipKey = disabled
-                ? getToolDisabledTooltipKey(
-                    tool.name,
-                    isImageUnderstandingAvailable,
-                    isVideoUnderstandingAvailable,
-                    isEmbeddingAvailable,
-                    isAudioUnderstandingAvailable
-                  )
-                : null;
-
-              const row = (
-                <ResourceItem
-                  item={{
-                    key: String(tool.id),
-                    name: tool.name,
-                    description: getToolDescription(tool),
-                    tags: getToolLabels(tool),
-                    raw: tool,
-                  }}
-                  selected={isSelected}
-                  disabled={disabled}
-                  onToggle={() => void handleToolToggle(tool)}
-                  slots={{
-                    renderTags: () => (
-                      <ResourceAssignedTags
-                        resourceType="tool"
-                        resourceId={String(tool.id)}
-                        tags={getToolLabels(tool)}
-                        assignments={
-                          toolAssignments.data?.[String(tool.id)] ?? []
-                        }
-                        refreshKey={resourceTags.revision}
-                      />
-                    ),
-                    renderActions: () =>
-                      !disabled ? (
-                        <button
-                          type="button"
-                          onClick={() => void openConfigModal(tool)}
-                          aria-label={t("toolPool.configure")}
-                          title={t("toolPool.configure")}
-                          className="flex size-7 shrink-0 items-center justify-center rounded-md text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600"
-                        >
-                          <Settings className="size-4" />
-                        </button>
-                      ) : null,
-                  }}
-                />
-              );
-
-              return (
-                <div key={tool.id}>
-                  {disabledTooltipKey ? (
-                    <Tooltip
-                      title={t(disabledTooltipKey)}
-                      mouseEnterDelay={0.2}
-                    >
-                      <div>{row}</div>
-                    </Tooltip>
-                  ) : (
-                    row
-                  )}
-                </div>
-              );
-            })}
+            {activeTab === "mcp"
+              ? pagedGroups.map((group) => (
+                  <McpToolGroup
+                    key={group.name}
+                    name={group.name || t("toolPool.mcpUnknownService")}
+                    server={mcpServersByName.get(group.name)}
+                    tools={group.tools}
+                    selectedIds={selectedToolIds}
+                    eligibleIds={eligibleIds}
+                    selecting={isSelectingAll}
+                    searching={
+                      Boolean(search.trim()) ||
+                      resourceTags.predicates.length > 0
+                    }
+                    onSelect={selectScope}
+                    renderTool={renderTool}
+                  />
+                ))
+              : pagedTools.map(renderTool)}
           </ResourceCollection>
         ) : (
           <div className="flex flex-1 items-center justify-center text-sm text-gray-400">

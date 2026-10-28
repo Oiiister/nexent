@@ -7,7 +7,7 @@ import time
 import traceback
 
 import httpx
-from consts.const import DATA_PROCESS_SERVICE
+from contracts.constants.environment import DATA_PROCESS_SERVICE
 
 logger = logging.getLogger(__name__)
 
@@ -127,7 +127,7 @@ async def get_all_files_status(index_name: str):
         redis_progress_batch = {}
         if file_states:
             try:
-                from services.redis_service import get_redis_service
+                from management.services.knowledge_base.task_state import get_redis_service
 
                 redis_service = get_redis_service()
                 all_task_ids = [

@@ -8,13 +8,13 @@ from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from apps import tag_management_app
-from consts.exceptions import ValidationError as DomainValidationError
-from consts.model import ToolTagAssignmentBatchRequest
-from database.tag_management_db import TagManagementDB
-from database.tool_db import query_tenant_tools_by_ids
-from services.tag_management_service import TagManagementService
-from services.tag_resource_adapters import AuthenticatedCaller
+from management.api.tag import tag_management as tag_management_app
+from contracts.errors.exceptions import ValidationError as DomainValidationError
+from contracts.tag import ToolTagAssignmentBatchRequest
+from management.db.tag.repository import TagManagementDB
+from management.db.tool.repository import query_tenant_tools_by_ids
+from management.services.tag.library import TagManagementService
+from management.services.tag.resources import AuthenticatedCaller
 
 
 @pytest.mark.parametrize("ids", [[], [0], [-1], [2**63], list(range(1, 502))])
@@ -49,7 +49,7 @@ def test_http_batch_route_validates_body_and_accepts_frontend_string_ids(monkeyp
 def test_batch_service_uses_two_bulk_calls_and_omits_invisible_ids(monkeypatch):
     tools = MagicMock(return_value=[{"tool_id": 2}, {"tool_id": 1}])
     assignments = MagicMock(return_value={"2": [{"value_id": 7}], "1": []})
-    monkeypatch.setattr("services.tag_management_service.query_tenant_tools_by_ids", tools)
+    monkeypatch.setattr("management.services.tag.library.query_tenant_tools_by_ids", tools)
     monkeypatch.setattr(TagManagementDB, "list_resource_assignments_batch", assignments)
     monkeypatch.setattr(
         TagManagementDB, "list_resource_assignments",
@@ -66,7 +66,7 @@ def test_batch_service_uses_two_bulk_calls_and_omits_invisible_ids(monkeypatch):
 
 def test_empty_batch_avoids_database(monkeypatch):
     tools = MagicMock()
-    monkeypatch.setattr("services.tag_management_service.query_tenant_tools_by_ids", tools)
+    monkeypatch.setattr("management.services.tag.library.query_tenant_tools_by_ids", tools)
     assert TagManagementService.get_tool_assignments_batch(AuthenticatedCaller("u", "t"), []) == []
     tools.assert_not_called()
 
@@ -78,7 +78,7 @@ def test_tool_lookup_uses_one_tenant_scoped_in_query(monkeypatch):
     query.all.return_value = []
     context = MagicMock()
     context.__enter__.return_value = session
-    monkeypatch.setattr("database.tool_db.get_db_session", lambda: context)
+    monkeypatch.setattr("management.db.tool.repository.get_db_session", lambda: context)
     assert query_tenant_tools_by_ids("tenant-a", [1, 2]) == []
     session.query.assert_called_once()
     query.all.assert_called_once()
@@ -99,7 +99,7 @@ def test_assignment_batch_uses_one_query_and_preserves_empty_resources(monkeypat
     query.all.return_value = [(SimpleNamespace(resource_id="2"), definition, value)]
     context = MagicMock()
     context.__enter__.return_value = session
-    monkeypatch.setattr("database.tag_management_db.get_db_session", lambda: context)
+    monkeypatch.setattr("management.db.tag.repository.get_db_session", lambda: context)
     binding = MagicMock()
     monkeypatch.setattr(TagManagementDB, "_get_active_resource_binding", binding)
     result = TagManagementDB.list_resource_assignments_batch("tenant-a", "tool", ["1", "2"], "default_resource")

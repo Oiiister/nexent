@@ -6,10 +6,6 @@ import { WorkbenchResourceDrawer } from "./WorkbenchResourceDrawer";
 import { ResourceTagFilter } from "./ResourceTagFilter";
 import { useResourceTags } from "../hooks/useResourceTags";
 
-import { ResourceSelectionActions } from "@/features/workbench/components/ResourceSelectionActions";
-
-import { SelectedResourceTags } from "@/features/workbench/components/SelectedResourceTags";
-
 import { ResourceSelectionGrid } from "@/features/workbench/components/ResourceSelectionGrid";
 
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -21,7 +17,6 @@ import {
   Select,
   Spin,
   Switch,
-  Tabs,
   message,
 } from "antd";
 import {
@@ -32,13 +27,8 @@ import type { SkillRepositoryListingItem } from "@/types/skillRepository";
 import { fetchSkillsList, type SkillListItem } from "@/services/skillService";
 import type { WorkbenchSkillMount } from "../types";
 import { ResourceSelectionRow } from "./ResourceSelectionRow";
-import {
-  ResourcePagination,
-  RESOURCE_PAGE_SIZE,
-  resourcePage,
-} from "./ResourcePagination";
+import { RESOURCE_PAGE_SIZE, resourcePage } from "./ResourcePagination";
 import { validateSkillConfig } from "../skillConfig";
-import { RestoreDefaultsButton } from "./RestoreDefaultsButton";
 
 function missingRequiredConfig(
   skill: SkillListItem,
@@ -57,14 +47,12 @@ export function SkillPicker({
   selected,
   onCancel,
   onConfirm,
-  loadDefaults,
   disabled = false,
 }: {
   open: boolean;
   disabled?: boolean;
   selected: WorkbenchSkillMount[];
   onCancel: () => void;
-  loadDefaults?: () => Promise<WorkbenchSkillMount[]>;
   onConfirm: (
     mounts: WorkbenchSkillMount[],
     skills: SkillListItem[]
@@ -76,10 +64,10 @@ export function SkillPicker({
     () => new Set(selected.map((mount) => mount.skill_id))
   );
   const [search, setSearch] = useState("");
+  const [pageSize, setPageSize] = useState(RESOURCE_PAGE_SIZE);
+  const [refreshRevision, setRefreshRevision] = useState(0);
   const [listError, setListError] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [restoring, setRestoring] = useState(false);
-  const restoreOperationRef = useRef(0);
   const [tab, setTab] = useState("mine");
   const [repository, setRepository] = useState<SkillRepositoryListingItem[]>(
     []
@@ -113,16 +101,29 @@ export function SkillPicker({
   );
   const repositoryTags = useResourceTags(open, "skill", [], true);
   const tags = tab === "mine" ? mineTags : repositoryTags;
-  const mineRequest = useMemo(() => ({ open, selected }), [open, selected]);
+  const mineRequest = useMemo(
+    () => ({ open, selected, refreshRevision }),
+    [open, selected, refreshRevision]
+  );
   const repositoryRequest = useMemo(
     () => ({
       open,
       tab,
       search,
       page: repositoryPage,
+      pageSize,
+      refreshRevision,
       predicates: repositoryTags.predicates,
     }),
-    [open, tab, search, repositoryPage, repositoryTags.predicates]
+    [
+      open,
+      tab,
+      search,
+      repositoryPage,
+      pageSize,
+      refreshRevision,
+      repositoryTags.predicates,
+    ]
   );
   const [settledMineRequest, setSettledMineRequest] = useState<
     typeof mineRequest | null
@@ -157,7 +158,6 @@ export function SkillPicker({
       setRepositoryPage(1);
     }
     if (!open && previousInputs.open !== open) {
-      setRestoring(false);
       setEditingId(null);
       setConfigQueue([]);
       setInstalling(null);
@@ -178,7 +178,6 @@ export function SkillPicker({
   }
   useEffect(() => {
     if (!open) {
-      restoreOperationRef.current += 1;
       installOperationRef.current += 1;
     }
   }, [open]);
@@ -193,7 +192,9 @@ export function SkillPicker({
         if (!cancelled) {
           setListError(true);
           message.error(
-            error instanceof Error ? error.message : "Skill 加载失败"
+            error instanceof Error
+              ? error.message
+              : t("workbench.controls.skillLoadFailed")
           );
         }
       })
@@ -203,7 +204,7 @@ export function SkillPicker({
     return () => {
       cancelled = true;
     };
-  }, [open, mineRequest]);
+  }, [open, mineRequest, t]);
 
   useEffect(() => {
     if (!open || tab !== "repository") return;
@@ -211,7 +212,7 @@ export function SkillPicker({
     void fetchSkillRepositoryListings({
       search: repositoryRequest.search,
       page: repositoryRequest.page,
-      page_size: RESOURCE_PAGE_SIZE,
+      page_size: repositoryRequest.pageSize,
       status: "shared",
       tag_predicates: repositoryRequest.predicates,
     })
@@ -242,7 +243,7 @@ export function SkillPicker({
       );
       if (operation !== installOperationRef.current) return;
       if (!result.skill_id)
-        throw new Error("安装响应缺少 Skill ID，请刷新后检查安装结果");
+        throw new Error(t("workbench.controls.skillInstallMissingId"));
       const items = await fetchSkillsList();
       if (operation !== installOperationRef.current) return;
       setSkills(items);
@@ -261,7 +262,12 @@ export function SkillPicker({
       if ((error as { status?: number }).status === 409) {
         setConflict(item);
         setTargetName(`${item.name}-copy`);
-      } else message.error(error instanceof Error ? error.message : "安装失败");
+      } else
+        message.error(
+          error instanceof Error
+            ? error.message
+            : t("workbench.controls.installFailed")
+        );
     } finally {
       if (operation === installOperationRef.current) setInstalling(null);
     }
@@ -282,23 +288,23 @@ export function SkillPicker({
   }, [search, skills, mineTags.visibleIds]);
 
   const allSelected =
-    resourcePage(filtered, minePage).length > 0 &&
-    resourcePage(filtered, minePage).every((skill) =>
+    resourcePage(filtered, minePage, pageSize).length > 0 &&
+    resourcePage(filtered, minePage, pageSize).every((skill) =>
       selectedIds.has(Number(skill.skill_id))
     );
   const toggleAll = () => {
     const next = new Set(selectedIds);
-    resourcePage(filtered, minePage).forEach((skill) => {
+    resourcePage(filtered, minePage, pageSize).forEach((skill) => {
       const id = Number(skill.skill_id);
       if (allSelected) next.delete(id);
       else next.add(id);
     });
     if (next.size > 20) {
-      message.warning("最多选择 20 个 Skills，请缩小搜索范围后重试");
+      message.warning(t("workbench.controls.skillLimitSearch"));
       return;
     }
     if (!allSelected) {
-      const queue = resourcePage(filtered, minePage)
+      const queue = resourcePage(filtered, minePage, pageSize)
         .filter(
           (skill) =>
             !selectedIds.has(Number(skill.skill_id)) &&
@@ -318,24 +324,17 @@ export function SkillPicker({
   };
 
   const submit = async () => {
-    if (
-      disabled ||
-      loading ||
-      saving ||
-      restoring ||
-      installing !== null ||
-      listError
-    )
+    if (disabled || loading || saving || installing !== null || listError)
       return;
     if (selectedIds.size > 20) {
-      message.warning("最多选择 20 个 Skills");
+      message.warning(t("workbench.controls.skillLimit"));
       return;
     }
     const selectedSkills = skills.filter((skill) =>
       selectedIds.has(Number(skill.skill_id))
     );
     if (selectedSkills.length !== selectedIds.size) {
-      message.warning("部分已选 Skill 不可用，请重新选择");
+      message.warning(t("workbench.controls.skillsUnavailable"));
       return;
     }
     if (
@@ -343,7 +342,7 @@ export function SkillPicker({
         missingRequiredConfig(skill, configs[Number(skill.skill_id)])
       )
     ) {
-      message.warning("请先补全所选 Skill 的必填配置");
+      message.warning(t("workbench.controls.completeSkillConfig"));
       return;
     }
     const mounts = selectedSkills.map((skill) => {
@@ -358,7 +357,9 @@ export function SkillPicker({
       await onConfirm(mounts, selectedSkills);
     } catch (error) {
       message.error(
-        error instanceof Error ? error.message : "资源配置保存失败"
+        error instanceof Error
+          ? error.message
+          : t("workbench.controls.saveConfigFailed")
       );
     } finally {
       setSaving(false);
@@ -397,8 +398,8 @@ export function SkillPicker({
                           onClick={() => void install(item)}
                         >
                           {installing === item.skill_repository_id
-                            ? "安装中"
-                            : "安装并选择"}
+                            ? t("workbench.controls.installing")
+                            : t("workbench.controls.installAndSelect")}
                         </Button>
                       }
                       onClick={() => void install(item)}
@@ -407,7 +408,7 @@ export function SkillPicker({
                 </ResourceSelectionGrid>
               </Spin>
               <Modal
-                title="Skill 名称已存在"
+                title={t("workbench.controls.skillNameExists")}
                 open={!!conflict}
                 onCancel={() => {
                   installOperationRef.current += 1;
@@ -417,13 +418,13 @@ export function SkillPicker({
                 onOk={() =>
                   conflict && void install(conflict, targetName.trim())
                 }
-                okText="重命名安装"
+                okText={t("workbench.controls.renameInstall")}
                 okButtonProps={{ disabled: !targetName.trim() }}
               >
                 <Input
                   value={targetName}
                   onChange={(event) => setTargetName(event.target.value)}
-                  aria-label="新 Skill 名称"
+                  aria-label={t("workbench.controls.newSkillName")}
                 />
                 {skills.some((skill) => skill.name === conflict?.name) && (
                   <button
@@ -450,7 +451,7 @@ export function SkillPicker({
                       setTab("mine");
                     }}
                   >
-                    使用已有 Skill
+                    {t("workbench.controls.useExistingSkill")}
                   </button>
                 )}
               </Modal>
@@ -473,8 +474,9 @@ export function SkillPicker({
               {skills
                 .filter(
                   (skill) =>
-                    resourcePage(filtered, minePage).includes(skill) ||
-                    Number(skill.skill_id) === editingId
+                    resourcePage(filtered, minePage, pageSize).includes(
+                      skill
+                    ) || Number(skill.skill_id) === editingId
                 )
                 .map((skill) => {
                   const skillId = Number(skill.skill_id);
@@ -485,7 +487,9 @@ export function SkillPicker({
                   );
                   return (
                     <div key={skillId} className="contents">
-                      {resourcePage(filtered, minePage).includes(skill) && (
+                      {resourcePage(filtered, minePage, pageSize).includes(
+                        skill
+                      ) && (
                         <ResourceSelectionRow
                           key={skillId}
                           title={skill.name}
@@ -518,20 +522,24 @@ export function SkillPicker({
                               );
                           }}
                           disabledReason={
-                            invalid ? "需要填写必填配置" : undefined
+                            invalid
+                              ? t("workbench.controls.requiredConfig")
+                              : undefined
                           }
                         />
                       )}
                       {editingId === skillId && (
                         <Modal
-                          title={`配置 ${skill.name}`}
+                          title={t("workbench.controls.configureSkill", {
+                            name: skill.name,
+                          })}
                           open
                           onCancel={() => {
                             setEditingId(null);
                             setConfigQueue([]);
                           }}
-                          okText="保存配置"
-                          cancelText="取消"
+                          okText={t("workbench.controls.saveConfig")}
+                          cancelText={t("common.cancel")}
                           onOk={() => {
                             if (
                               missingRequiredConfig(
@@ -539,7 +547,9 @@ export function SkillPicker({
                                 draftConfigs[skillId]
                               )
                             ) {
-                              message.warning("请先补全所选 Skill 的必填配置");
+                              message.warning(
+                                t("workbench.controls.completeSkillConfig")
+                              );
                               return;
                             }
                             if (
@@ -673,23 +683,88 @@ export function SkillPicker({
           )}
         </>
       }
-      pagination={
-        <ResourcePagination
-          current={tab === "repository" ? repositoryPage : minePage}
-          total={tab === "repository" ? repositoryTotal : filtered.length}
-          onChange={tab === "repository" ? setRepositoryPage : setMinePage}
-          disabled={
-            loading || saving || installing !== null || editingId !== null
-          }
-        />
-      }
+      picker={{
+        keyword: search,
+        searchPlaceholder: t(
+          "skillPool.searchSkillsPlaceholder",
+          "搜索 Skill 名称或描述"
+        ),
+        onSearch: (value) => {
+          setSearch(value);
+          setMinePage(1);
+          setRepositoryPage(1);
+        },
+        tagFilter: (
+          <ResourceTagFilter
+            filter={tags}
+            onChange={() => {
+              setMinePage(1);
+              setRepositoryPage(1);
+            }}
+          />
+        ),
+        listTitle: t("resourcePicker.list.skill", "技能列表"),
+        selected: skills
+          .filter((skill) => selectedIds.has(Number(skill.skill_id)))
+          .map((skill) => ({ id: String(skill.skill_id), label: skill.name })),
+        onRemoveSelected: (id) =>
+          setSelectedIds((current) => {
+            const next = new Set(current);
+            next.delete(Number(id));
+            return next;
+          }),
+        tabs: [
+          { key: "mine", label: t("workbench.controls.mineTab", "我的") },
+          {
+            key: "repository",
+            label: t("workbench.controls.repositoryTab", "仓库"),
+          },
+        ],
+        activeTab: tab,
+        onTabChange: (value) => {
+          installOperationRef.current += 1;
+          setInstalling(null);
+          setConflict(null);
+          setTab(value);
+          setRepositoryPage(1);
+        },
+        onRefresh: () => {
+          tags.retry?.();
+          setListError(false);
+          setRefreshRevision((value) => value + 1);
+        },
+        total: tab === "repository" ? repositoryTotal : filtered.length,
+        page: tab === "repository" ? repositoryPage : minePage,
+        pageSize,
+        onPageSizeChange: (size) => {
+          setPageSize(size);
+          setMinePage(1);
+          setRepositoryPage(1);
+        },
+        onPageChange: tab === "repository" ? setRepositoryPage : setMinePage,
+        onSelectAll: toggleAll,
+        allSelected,
+        partiallySelected:
+          !allSelected &&
+          resourcePage(filtered, minePage, pageSize).some((skill) =>
+            selectedIds.has(Number(skill.skill_id))
+          ),
+        selectAllDisabled:
+          loading ||
+          saving ||
+          listError ||
+          installing !== null ||
+          tab !== "mine" ||
+          filtered.length === 0,
+        refreshDisabled: loading || saving || installing !== null,
+      }}
+
       title={t("chat.composer.skills", "Skills")}
       open={open}
       saving={saving}
       disabled={disabled}
       confirmDisabled={
         loading ||
-        restoring ||
         listError ||
         installing !== null ||
         (!!tags.predicates.length && tags.loading)
@@ -701,115 +776,6 @@ export function SkillPicker({
         onCancel();
       }}
       onConfirm={() => void submit()}
-      footerLeading={
-        loadDefaults ? (
-          <RestoreDefaultsButton
-            loading={restoring}
-            disabled={loading || saving || installing !== null || listError}
-            onClick={async () => {
-              const operation = ++restoreOperationRef.current;
-              setRestoring(true);
-              try {
-                const defaults = await loadDefaults();
-                if (operation !== restoreOperationRef.current) return;
-                setSelectedIds(
-                  new Set(defaults.map((mount) => mount.skill_id))
-                );
-                setConfigs(
-                  Object.fromEntries(
-                    defaults.map((mount) => [
-                      mount.skill_id,
-                      structuredClone(mount.config_values),
-                    ])
-                  )
-                );
-                setEditingId(null);
-                setConfigQueue([]);
-                setDraftConfigs({});
-                setSearch("");
-                setTab("mine");
-              } catch (error) {
-                if (operation === restoreOperationRef.current)
-                  message.error(
-                    error instanceof Error
-                      ? error.message
-                      : "恢复默认 Skills 失败"
-                  );
-              } finally {
-                if (operation === restoreOperationRef.current)
-                  setRestoring(false);
-              }
-            }}
-          >
-            恢复默认
-          </RestoreDefaultsButton>
-        ) : undefined
-      }
-    >
-      <Tabs
-        activeKey={tab}
-        onChange={(value) => {
-          installOperationRef.current += 1;
-          setInstalling(null);
-          setConflict(null);
-          setTab(value);
-          setRepositoryPage(1);
-        }}
-        items={[
-          { key: "mine", label: "我的" },
-          { key: "repository", label: "仓库" },
-        ]}
-      />
-      <ResourceTagFilter
-        filter={tags}
-        onChange={() => {
-          setMinePage(1);
-          setRepositoryPage(1);
-        }}
-        search={
-          <Input.Search
-            value={search}
-            onChange={(event) => {
-              setSearch(event.target.value);
-              setRepositoryPage(1);
-            }}
-            placeholder="搜索 Skill 名称或描述"
-            allowClear
-          />
-        }
-      />
-      <p className="mt-2 text-xs text-muted-foreground">
-        {t("workbench.controls.installedNotice")}
-      </p>
-      {
-        <div className="mt-3 flex items-center justify-between gap-3 rounded bg-blue-50 px-4 py-3">
-          <SelectedResourceTags
-            items={skills
-              .filter((skill) => selectedIds.has(Number(skill.skill_id)))
-              .map((skill) => ({
-                id: String(skill.skill_id),
-                name: skill.name,
-              }))}
-            onRemove={(id) =>
-              setSelectedIds((current) => {
-                const next = new Set(current);
-                next.delete(Number(id));
-                return next;
-              })
-            }
-          />
-          <ResourceSelectionActions
-            toggleAllDisabled={tab !== "mine"}
-            pageOnly
-            allSelected={allSelected}
-            hasSelection={selectedIds.size > 0}
-            disabled={loading || saving || listError || installing !== null}
-            empty={filtered.length === 0}
-            onToggleAll={toggleAll}
-            onClear={() => setSelectedIds(new Set())}
-          />
-        </div>
-      }
-    </WorkbenchResourceDrawer>
+    ></WorkbenchResourceDrawer>
   );
 }

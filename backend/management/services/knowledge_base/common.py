@@ -17,23 +17,18 @@ import logging
 from contextvars import ContextVar
 from typing import Any, Optional
 
-from consts.const import (
-    DATAMATE_URL,
-    ES_API_KEY,
-    ES_HOST,
-    VectorDatabaseType,
-)
-from database.knowledge_db import (
-    get_knowledge_record,
-)
+from contracts.constants.constants import DATAMATE_URL
+from contracts.constants.environment import ES_API_KEY, ES_HOST
+from contracts.knowledge import VectorDatabaseType
+from management.db.knowledge_base.repository import get_knowledge_record
 from management.services.model.resolver import (
     get_embedding_model_by_id,
 )
 from nexent.vector_database.base import VectorDatabaseCore
 from nexent.vector_database.datamate_core import DataMateCore
 from nexent.vector_database.elasticsearch_core import ElasticSearchCore
-from services.redis_service import get_redis_service
-from utils.config_utils import tenant_config_manager
+from management.services.knowledge_base.task_state import get_redis_service
+from management.services.configuration.tenant.settings import tenant_config_manager
 
 
 def _update_progress(task_id: str, processed: int, total: int):

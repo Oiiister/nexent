@@ -4,6 +4,7 @@
 
 import asyncio
 import json
+from contracts.errors.exceptions import UnauthorizedError
 import logging
 import uuid
 from copy import (
@@ -17,45 +18,21 @@ from typing import (
     Dict,
 )
 
-from agents.agent_run_manager import (
+from management.services.agent.lifecycle import (
     AgentRunAlreadyActiveError,
     AgentRunConcurrencyExceededError,
     agent_run_manager,
 )
-from consts.const import (
-    DEFAULT_EN_TITLE,
-    DEFAULT_ZH_TITLE,
-    ENABLE_AGENT_WORKBENCH,
-    LANGUAGE,
-    MESSAGE_ROLE,
-    RUNTIME_AGENT_ID_MAX_CONCURRENT_RUNS,
-    STREAM_STATUS_EVENT,
-)
-from consts.error_code import (
-    ErrorCode,
-    RuntimeMetadataValidationCode,
-)
-from consts.exceptions import (
-    AppException,
-    ConversationNotFoundError,
-    ForbiddenError,
-    RuntimeCapacityExceededError,
-    RuntimeMetadataValidationError,
-    RuntimeMetadataVersionConflict,
-    RuntimeQueueTimeoutError,
-    ValidationError,
-    WorkbenchError,
-)
-from consts.model import (
-    AgentRequest,
-    ConversationKnowledgeScopeRequest,
-)
-from database.agent_db import (
-    search_agent_info_by_agent_id,
-)
-from database.conversation_db import (
-    resolve_conversation_runtime_metadata,
-)
+from contracts.constants.constants import DEFAULT_EN_TITLE, DEFAULT_ZH_TITLE, MESSAGE_ROLE
+from contracts.constants.environment import ENABLE_AGENT_WORKBENCH, RUNTIME_AGENT_ID_MAX_CONCURRENT_RUNS
+from contracts.constants.constants import LANGUAGE
+from contracts.constants.constants import STREAM_STATUS_EVENT
+from contracts.errors.codes import ErrorCode, RuntimeMetadataValidationCode
+from contracts.errors.exceptions import AppException, ConversationNotFoundError, ForbiddenError, RuntimeCapacityExceededError, RuntimeMetadataValidationError, RuntimeMetadataVersionConflict, RuntimeQueueTimeoutError, ValidationError, WorkbenchError
+from contracts.agent import AgentRequest
+from contracts.knowledge import ConversationKnowledgeScopeRequest
+from management.db.agent.repository import search_agent_info_by_agent_id
+from management.db.conversation.repository import resolve_conversation_runtime_metadata
 from fastapi import (
     Request,
 )
@@ -80,7 +57,7 @@ from management.services.agent.run import (
 from management.services.agent.stream import (
     safe_agent_stream_error_chunk as _safe_agent_stream_error_chunk,
 )
-from nexent.core.agents.run_agent import (
+from runtime.adapters.nexent.runner import (
     DeferredAgentRun,
 )
 from nexent.core.concurrency import (
@@ -92,7 +69,7 @@ from nexent.core.concurrency import (
 from nexent.monitor import (
     agent_monitoring_context,
 )
-from services.conversation_management_service import (
+from management.services.conversation.service import (
     create_new_conversation,
     get_conversation_service,
     get_last_unit_for_message,
@@ -104,24 +81,21 @@ from services.conversation_management_service import (
     update_conversation_workbench_config_service,
     update_message_status,
 )
-from services.knowledge_scope_service import (
+from management.services.knowledge_base.scope import (
     build_runtime_knowledge_resources,
     resolve_knowledge_scope,
 )
-from services.runtime_state_service import (
+from management.services.agent.run_state import (
     runtime_state_service,
 )
-from services.streaming_channel import (
+from infrastructure.streaming.channels import (
     streaming_channel_manager,
 )
-from services.thread_lifecycle_service import (
+from infrastructure.concurrency import (
     runtime_thread_manager,
 )
-from utils.auth_utils import (
-    get_current_user_info,
-    get_user_language,
-)
-from utils.runtime_metadata_utils import (
+from management.utils.request_context import get_user_language
+from infrastructure.serialization.runtime_metadata import (
     validate_runtime_metadata,
 )
 
@@ -129,19 +103,14 @@ logger = logging.getLogger(__name__)
 
 
 def _resolve_user_tenant_language(
-    authorization: str,
     http_request: Request | None = None,
     user_id: str | None = None,
     tenant_id: str | None = None,
 ):
-    """Resolve user_id, tenant_id, language with optional overrides.
-
-    If user_id and tenant_id are provided, do not parse from authorization again.
-    """
-    if user_id is None or tenant_id is None:
-        return get_current_user_info(authorization, http_request)
-    else:
-        return user_id, tenant_id, get_user_language(http_request)
+    """Require established identity and read the request language preference."""
+    if not user_id or not tenant_id:
+        raise UnauthorizedError("Authenticated user and tenant are required")
+    return user_id, tenant_id, get_user_language(http_request)
 
 
 def _detect_resume_position(
@@ -221,7 +190,6 @@ def _detect_resume_position(
 async def run_agent_stream(
     agent_request: AgentRequest,
     http_request: Request,
-    authorization: str,
     user_id: str = None,
     tenant_id: str = None,
     skip_user_save: bool = False,
@@ -229,7 +197,7 @@ async def run_agent_stream(
 ):
     """
     Start an agent run and stream responses.
-    If user_id or tenant_id is provided, authorization will be overridden. (Useful in northbound apis)
+    The gateway must supply the authenticated user and tenant for every entrypoint.
 
     Args:
         resume: If True, check for existing streaming message and continue from where it left off
@@ -238,7 +206,6 @@ async def run_agent_stream(
         raise WorkbenchError("WORKBENCH_DISABLED", status_code=404)
 
     resolved_user_id, resolved_tenant_id, language = _resolve_user_tenant_language(
-        authorization=authorization,
         http_request=http_request,
         user_id=user_id,
         tenant_id=tenant_id,
@@ -288,7 +255,7 @@ async def run_agent_stream(
 
     canonical_workbench = None
     if agent_request.entrypoint == "workbench" and not resume:
-        from services.workbench_service import (
+        from management.services.agent.workbench import (
             assert_workbench_version,
             resolve_workbench_config,
         )
@@ -301,7 +268,7 @@ async def run_agent_stream(
             if requested_workbench is None and isinstance(
                 conversation.get("workbench_config"), dict
             ):
-                from consts.model import WorkbenchSessionConfig
+                from contracts.agent import WorkbenchSessionConfig
 
                 requested_workbench = WorkbenchSessionConfig.model_validate(
                     conversation["workbench_config"]
@@ -954,20 +921,6 @@ async def run_agent_stream(
 
     async def stream_with_agent_context():
         try:
-            producer_task = None
-            if channel is not None:
-                producer_task = asyncio.create_task(
-                    _consume_agent_stream_producer(
-                        stream_gen=stream_gen,
-                        channel=channel,
-                        agent_metadata=agent_metadata,
-                        conversation_id=agent_request.conversation_id,
-                        user_id=resolved_user_id,
-                    )
-                )
-                _agent_stream_producer_tasks.add(producer_task)
-                producer_task.add_done_callback(_agent_stream_producer_tasks.discard)
-
             # Emit conversation_created event for new conversations
             if is_new_conversation:
                 yield (
@@ -1044,11 +997,12 @@ async def run_agent_stream(
                     wait_timeout=0,
                     mark_stuck_on_timeout=False,
                 )
-            agent_run_manager.release_agent_run_reservation(
-                _agent_run_identifier(agent_request),
-                resolved_user_id,
-                reservation_token,
-            )
+            if channel is None:
+                agent_run_manager.release_agent_run_reservation(
+                    _agent_run_identifier(agent_request),
+                    resolved_user_id,
+                    reservation_token,
+                )
 
     headers = {
         "Cache-Control": "no-cache",
@@ -1067,8 +1021,46 @@ async def run_agent_stream(
     if workbench_config_version is not None:
         headers["X-Workbench-Config-Version"] = str(workbench_config_version)
 
-    return StreamingResponse(
+    response = StreamingResponse(
         stream_with_agent_context(),
         media_type="text/event-stream",
         headers=headers,
     )
+
+    if channel is not None:
+        def release_producer_resources(task: asyncio.Task) -> None:
+            """Retain preparation ownership until the detached producer exits."""
+            _agent_stream_producer_tasks.discard(task)
+            reservation_released = agent_run_manager.release_agent_run_reservation(
+                run_identifier,
+                resolved_user_id,
+                reservation_token,
+            )
+            # A task cancelled before its first iteration cannot run the
+            # generator's finally block to release the deferred worker.
+            # A consumed/released reservation belongs to generate_stream;
+            # let its bound worker finish its own cleanup.
+            if reservation_released and not execution.future.done():
+                deferred_run.cancel()
+                runtime_thread_manager.cancel(
+                    execution.execution_id,
+                    reason="agent stream producer finished",
+                    wait_timeout=0,
+                    mark_stuck_on_timeout=False,
+                )
+
+        # Start independently of response-body iteration so clients may close
+        # the connection as soon as they receive the conversation ID header.
+        producer_task = asyncio.create_task(
+            _consume_agent_stream_producer(
+                stream_gen=stream_gen,
+                channel=channel,
+                agent_metadata=agent_metadata,
+                conversation_id=agent_request.conversation_id,
+                user_id=resolved_user_id,
+            )
+        )
+        _agent_stream_producer_tasks.add(producer_task)
+        producer_task.add_done_callback(release_producer_resources)
+
+    return response

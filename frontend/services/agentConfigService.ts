@@ -11,6 +11,7 @@ import { NAME_CHECK_STATUS } from "@/const/agentConfig";
 import { fetchWithAuth, getAuthHeaders } from "@/lib/auth";
 import { convertParamType } from "@/lib/utils";
 import log from "@/lib/logger";
+import { extractFilenameFromContentDisposition } from "@/lib/downloadFilename";
 import type { Agent } from "@/types/agentConfig";
 import yaml from "js-yaml";
 import type { SkillFileNode } from "@/types/skill";
@@ -616,9 +617,7 @@ export interface UpdateAgentInfoPayload {
   description?: string;
   author?: string;
   author_cas_username?: string | null;
-  duty_prompt?: string;
-  constraint_prompt?: string;
-  few_shots_prompt?: string;
+  prompt?: string;
   group_ids?: number[];
   model_ids?: number[];
   max_steps?: number;
@@ -644,8 +643,6 @@ export interface UpdateAgentInfoPayload {
   business_description?: string;
   business_logic_model_name?: string;
   business_logic_model_id?: number;
-  prompt_template_id?: number;
-  prompt_template_name?: string;
   enabled_tool_ids?: number[];
   enabled_skill_ids?: number[];
   skill_instances?: Array<{
@@ -790,28 +787,7 @@ export const exportAgent = async (agentId: number) => {
  * @param contentDisposition The Content-Disposition header value
  * @returns Extracted filename or null if not found
  */
-export const extractFilenameFromContentDisposition = (
-  contentDisposition: string | null
-): string | null => {
-  if (!contentDisposition) {
-    return null;
-  }
-
-  // RFC 5987 encoding, e.g. filename*=UTF-8''%E6%99%BA%E8%83%BD%E4%BD%93.zip
-  const utf8Regex = /filename\*=UTF-8''([^;]+)/i;
-  const utf8Match = utf8Regex.exec(contentDisposition);
-  if (utf8Match?.[1]) {
-    try {
-      return decodeURIComponent(utf8Match[1].trim());
-    } catch {
-      // fall back to plain filename parsing on invalid encoding
-    }
-  }
-
-  const regex = /filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/;
-  const match = regex.exec(contentDisposition);
-  return match?.[1]?.replace(/['"]/g, "").trim() ?? null;
-};
+export { extractFilenameFromContentDisposition };
 
 /**
  * Trigger browser download of a Blob
@@ -1138,14 +1114,10 @@ export const searchAgentInfo = async (
       // v2.6.0: per-agent model params override (model_id -> { temperature, top_p, extra_params })
       model_params_override: data.model_params_override ?? null,
       is_main_agent: data.is_main_agent ?? true,
-      duty_prompt: data.duty_prompt,
-      constraint_prompt: data.constraint_prompt,
-      few_shots_prompt: data.few_shots_prompt,
+      prompt: data.prompt,
       business_description: data.business_description,
       business_logic_model_name: data.business_logic_model_name,
       business_logic_model_id: data.business_logic_model_id,
-      prompt_template_id: data.prompt_template_id ?? 0,
-      prompt_template_name: data.prompt_template_name ?? "system_default",
       provide_run_summary: data.provide_run_summary,
       is_a2a: data.is_a2a ?? false,
       verification_config: data.verification_config,
@@ -1395,7 +1367,8 @@ export const validateTool = async (
   source: string,
   usage: string,
   inputs: Record<string, any> | null = null,
-  params: Record<string, any> | null = null
+  params: Record<string, any> | null = null,
+  language: "zh" | "en" = "zh"
 ) => {
   try {
     const requestBody = {
@@ -1404,6 +1377,7 @@ export const validateTool = async (
       usage: usage,
       inputs: inputs,
       params: params,
+      language,
     };
 
     const response = await fetch(API_ENDPOINTS.tool.validate, {

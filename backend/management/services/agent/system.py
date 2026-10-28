@@ -5,36 +5,20 @@
 import logging
 from typing import Any
 
-from consts.const import APP_VERSION, ENABLE_AIDP_KNOWLEDGE, LANGUAGE
-from consts.exceptions import WorkbenchAgentError
-from consts.model import AgentInfoRequest, ToolInstanceInfoRequest
-from contracts.agent import (
-    SystemAgentRef,
-    WorkbenchReleaseManifest,
-)
-from database import skill_db
-from database.agent_db import (
-    clear_agent_new_mark,
-    create_agent,
-    search_system_agent,
-    update_agent,
-    update_system_agent_revision,
-)
-from database.skill_db import delete_skills_by_agent_id
-from database.tool_db import (
-    create_or_update_tool_by_tool_info,
-    delete_tools_by_agent_id,
-    query_all_tools,
-    query_tool_instances_by_agent_id,
-)
+from contracts.constants.environment import APP_VERSION, ENABLE_AIDP_KNOWLEDGE
+from contracts.constants.constants import LANGUAGE
+from contracts.errors.exceptions import WorkbenchAgentError
+from contracts.agent import AgentInfoRequest
+from contracts.tool import ToolInstanceInfoRequest
+from contracts.agent import SystemAgentRef, WorkbenchReleaseManifest
+from management.db.skill import repository as skill_db
+from management.db.agent.repository import clear_agent_new_mark, create_agent, search_system_agent, update_agent, update_system_agent_revision
+from management.db.skill.repository import delete_skills_by_agent_id
+from management.db.tool.repository import create_or_update_tool_by_tool_info, delete_tools_by_agent_id, query_all_tools, query_tool_instances_by_agent_id
 from management.services.skill.transfer import install_skills_from_zip_for_tenant
 from nexent.core.prompts import load_prompt
 from packaging.version import InvalidVersion, Version
-from services.agent_version_service import publish_version_impl
-from services.prompt_template_service import (
-    SYSTEM_PROMPT_TEMPLATE_ID,
-    SYSTEM_PROMPT_TEMPLATE_NAME,
-)
+from management.services.agent.versions import publish_version_impl
 from sqlalchemy.exc import IntegrityError
 
 logger = logging.getLogger(__name__)
@@ -194,8 +178,6 @@ class SystemAgentProvider:
             "agent_origin": "SYSTEM",
             "system_revision": None,
             "model_ids": [],
-            "prompt_template_id": SYSTEM_PROMPT_TEMPLATE_ID,
-            "prompt_template_name": SYSTEM_PROMPT_TEMPLATE_NAME,
             "group_ids": "",
             "ingroup_permission": "PRIVATE",
             "is_new": False,
@@ -490,9 +472,7 @@ class SystemAgentProvider:
             "provide_run_summary": False,
             "allow_chat_metadata": False,
             "is_a2a": False,
-            "duty_prompt": canonical_prompt,
-            "constraint_prompt": "",
-            "few_shots_prompt": "",
+            "prompt": canonical_prompt,
             "enabled": True,
         }
 

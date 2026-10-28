@@ -1,3 +1,4 @@
+# Copyright (c) 2025-2026 Huawei Technologies Co., Ltd. All rights reserved.
 import sys
 from unittest.mock import MagicMock
 
@@ -5,7 +6,7 @@ from test.backend.services import test_conversation_management_service as legacy
 
 
 service = __import__(
-    "backend.services.conversation_management_service",
+    "management.services.conversation.service",
     fromlist=["update_conversation_workbench_config_service"],
 )
 
@@ -37,7 +38,7 @@ def test_create_conversation_forwards_workbench_config(monkeypatch):
 
 
 def test_update_workbench_config_validates_and_forwards(monkeypatch):
-    monkeypatch.setattr(sys.modules["consts.model"], "WorkbenchSessionConfig", _ValidatedConfig, raising=False)
+    monkeypatch.setattr(sys.modules["contracts.agent"], "WorkbenchSessionConfig", _ValidatedConfig, raising=False)
     replace = MagicMock(return_value={"workbench_config_version": 3})
     monkeypatch.setattr(service, "replace_conversation_workbench_config", replace)
 
@@ -60,7 +61,7 @@ def test_update_workbench_config_validates_and_forwards(monkeypatch):
 
 
 def test_update_workbench_and_metadata_validates_and_forwards(monkeypatch):
-    monkeypatch.setattr(sys.modules["consts.model"], "WorkbenchSessionConfig", _ValidatedConfig, raising=False)
+    monkeypatch.setattr(sys.modules["contracts.agent"], "WorkbenchSessionConfig", _ValidatedConfig, raising=False)
     replace = MagicMock(return_value={"runtime_metadata_version": 5})
     monkeypatch.setattr(service, "replace_conversation_workbench_and_metadata", replace)
 

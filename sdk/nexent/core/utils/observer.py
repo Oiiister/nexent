@@ -1,4 +1,4 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+# Copyright (c) 2025-2026 Huawei Technologies Co., Ltd. All rights reserved.
 
 import json
 import re
@@ -28,10 +28,10 @@ _ANSI_ESCAPE_PATTERN = re.compile(
 _NL2AGENT_DRAFT_SYNC_FIELDS = frozenset(
     {
         "name",
+        "display_name",
         "description",
-        "duty_prompt",
-        "constraint_prompt",
-        "few_shots_prompt",
+        "enable_protocol_repair_retry",
+        "prompt",
         "greeting_message",
         "example_questions",
     }
@@ -628,9 +628,7 @@ class MessageObserver:
                     isinstance(field_name, str)
                     and field_name
                     in {
-                        "duty_prompt",
-                        "constraint_prompt",
-                        "few_shots_prompt",
+                        "prompt",
                         "greeting_message",
                         "example_questions",
                     }
